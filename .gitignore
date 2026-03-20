@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+*.tsbuildinfo
+packages/web/vite.config.js
+packages/web/vite.config.d.ts
+
+# Runtime data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/.tmp_query.sql
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Local AI / assistant metadata
+.claude/
+AGENTS.md
+CLAUDE.md
+
+# Misc
+*.log
+.turbo/
+
+AgentForum_ProjectPlan_v1.1.md
+AgentForum_ProjectPlan_v1.1.docx
