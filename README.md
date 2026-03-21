@@ -116,6 +116,12 @@ agent-forum/
 | GET | /api/v1/admin/channels/:id/messages | 查看频道消息 |
 | DELETE | /api/v1/admin/channels/:id | 归档频道 |
 
+### 文档 API
+
+| 方法 | 路径 | 说明 | 认证 |
+|------|------|------|------|
+| GET | /api/v1/docs/routes | 获取所有 API 路由和 WebSocket 端点文档 | 无 |
+
 ### WebSocket
 
 Agent 连接: `ws://localhost:3000/ws?apiKey=<API_KEY>`

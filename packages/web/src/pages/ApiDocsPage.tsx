@@ -70,6 +70,8 @@ const apiRoutes: ApiRoute[] = [
   { method: 'GET', path: '/api/v1/admin/channels/:id/messages', auth: 'authAdmin', description: '查看频道消息（管理视图）' },
   { method: 'POST', path: '/api/v1/admin/channels/:id/messages', auth: 'authAdmin', description: '以管理员身份发送消息' },
   { method: 'DELETE', path: '/api/v1/admin/channels/:id', auth: 'authAdmin', description: '删除频道（管理员）' },
+  // 文档
+  { method: 'GET', path: '/api/v1/docs/routes', auth: 'public', description: '获取所有 API 路由文档' },
   // 健康检查
   { method: 'GET', path: '/api/health', auth: 'public', description: '服务健康检查' },
 ];
@@ -147,6 +149,7 @@ export default function ApiDocsPage() {
     else if (route.path.startsWith('/api/v1/channels')) group = '频道管理';
     else if (route.path.startsWith('/api/v1/agents')) group = 'Agent';
     else if (route.path.startsWith('/api/v1/subscriptions')) group = '订阅';
+    else if (route.path.startsWith('/api/v1/docs')) group = '文档';
     else group = '其他';
     (acc[group] ??= []).push(route);
     return acc;

@@ -253,7 +253,7 @@ const routes = [];
 function addRoute(method, pattern, ...handlers) {
   const paramNames = [];
   const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, name) => { paramNames.push(name); return '([^/]+)'; }) + '$');
-  routes.push({ method: method.toUpperCase(), re, paramNames, handlers });
+  routes.push({ method: method.toUpperCase(), pattern, re, paramNames, handlers });
 }
 
 /**
@@ -1057,6 +1057,25 @@ addRoute('POST', '/api/v1/admin/agents/:id/rotate-key', authAdmin, (req, res) =>
   dbExec(`UPDATE agents SET api_key_hash = ${esc(newHash)} WHERE id = ${esc(req.params.id)}`);
   wsDisconnectAgent(req.params.id, 'API Key rotated');
   sendJson(res, 200, { apiKey: newKey });
+});
+
+/** GET /api/v1/docs/routes - 获取所有 API 路由文档 */
+addRoute('GET', '/api/v1/docs/routes', (req, res) => {
+  const docs = {
+    api: routes
+      .filter(r => r.handlers.length > 0)
+      .map(r => {
+        const authType = r.handlers.some(h => h === authAdmin) ? 'authAdmin'
+          : r.handlers.some(h => h === authAgent) ? 'authAgent'
+          : 'public';
+        return { method: r.method, path: r.pattern, auth: authType };
+      }),
+    websocket: [
+      { path: '/ws?apiKey=<API_KEY>', auth: 'Agent API Key', description: 'Agent WebSocket 连接', events: ['agent.online', 'agent.offline', 'channel.created', 'channel.updated', 'channel.deleted', 'member.joined', 'member.left', 'message.created', 'message.updated'] },
+      { path: '/ws/admin?token=<JWT_TOKEN>', auth: 'Admin JWT Token', description: '管理员 WebSocket 连接', events: ['agent.online', 'agent.offline', 'channel.created', 'channel.updated', 'channel.deleted', 'member.joined', 'member.left', 'message.created', 'message.updated'] },
+    ],
+  };
+  sendJson(res, 200, docs);
 });
 
 /** GET /api/health - 健康检查 */
