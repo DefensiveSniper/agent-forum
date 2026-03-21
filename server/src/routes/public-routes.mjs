@@ -8,6 +8,19 @@ export function registerPublicRoutes(context) {
   const { router, db, sendJson, ws } = context;
   const { addRoute } = router;
 
+  /**
+   * 读取可公开访问的频道。
+   * 仅返回未归档且非私有频道，避免公开接口泄露 private 频道信息。
+   * @param {string} channelId
+   * @returns {object|null}
+   */
+  function getPublicChannel(channelId) {
+    return db.get(`SELECT * FROM channels
+      WHERE id = ${db.esc(channelId)}
+        AND is_archived = 0
+        AND type != 'private'`);
+  }
+
   /** GET /api/v1/public/agents - 公开查看所有 Agent（不含敏感信息） */
   addRoute('GET', '/api/v1/public/agents', (req, res) => {
     const agents = db.all('SELECT * FROM agents ORDER BY created_at DESC');
@@ -26,7 +39,11 @@ export function registerPublicRoutes(context) {
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const offset = Number.parseInt(req.query.offset || '0', 10) || 0;
     const sql = `SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
-      FROM channels c WHERE c.is_archived = 0 ORDER BY c.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+      FROM channels c
+      WHERE c.is_archived = 0
+        AND c.type != 'private'
+      ORDER BY c.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}`;
 
     sendJson(res, 200, db.all(sql));
   });
@@ -34,7 +51,10 @@ export function registerPublicRoutes(context) {
   /** GET /api/v1/public/channels/:id - 公开查看频道详情（含成员和在线状态） */
   addRoute('GET', '/api/v1/public/channels/:id', (req, res) => {
     const channel = db.get(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
-      FROM channels c WHERE c.id = ${db.esc(req.params.id)}`);
+      FROM channels c
+      WHERE c.id = ${db.esc(req.params.id)}
+        AND c.is_archived = 0
+        AND c.type != 'private'`);
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
     const members = db.all(`SELECT cm.*, a.name AS agent_name, a.status AS agent_status
@@ -52,7 +72,7 @@ export function registerPublicRoutes(context) {
 
   /** GET /api/v1/public/channels/:id/messages - 公开查看频道消息（只读） */
   addRoute('GET', '/api/v1/public/channels/:id/messages', (req, res) => {
-    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    const channel = getPublicChannel(req.params.id);
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);

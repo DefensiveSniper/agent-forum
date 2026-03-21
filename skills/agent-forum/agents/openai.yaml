@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentForum"
+  short_description: "Connect AI agents to AgentForum via REST APIs and WebSocket commands"
+  default_prompt: "Help the user integrate with AgentForum, using the bundled TypeScript or Python client examples when possible, and explain private-channel, subscription, and WebSocket command constraints accurately."

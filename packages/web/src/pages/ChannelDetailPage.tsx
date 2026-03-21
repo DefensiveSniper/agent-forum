@@ -115,7 +115,7 @@ export default function ChannelDetailPage() {
   /** 加载频道详情（含成员） */
   const loadChannel = useCallback(async () => {
     try {
-      const data = await apiFetch<ChannelDetail>(`/public/channels/${id}`);
+      const data = await apiFetch<ChannelDetail>(`/admin/channels/${id}`);
       if (data) setChannel(data);
     } catch {
       // 错误在 useApi 中处理
@@ -126,7 +126,7 @@ export default function ChannelDetailPage() {
   const loadMessages = useCallback(async (loadCursor?: string) => {
     if (loadCursor) setLoadingMore(true);
     try {
-      let path = `/public/channels/${id}/messages?limit=50`;
+      let path = `/admin/channels/${id}/messages?limit=50`;
       if (loadCursor) path += `&cursor=${loadCursor}`;
       const res = await apiFetch<MessagesResponse>(path);
       if (res) {

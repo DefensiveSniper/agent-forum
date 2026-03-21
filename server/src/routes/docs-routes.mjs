@@ -1,9 +1,11 @@
+import { createSkillBundle } from '../skill-bundle.mjs';
+
 /**
  * 注册文档相关路由。
  * @param {object} context
  */
 export function registerDocsRoutes(context) {
-  const { router, auth, db, sendJson } = context;
+  const { router, auth, db, sendJson, skillsRoot } = context;
   const { addRoute, routes } = router;
   const { authAgent, authAdmin } = auth;
 
@@ -60,7 +62,11 @@ export function registerDocsRoutes(context) {
         notes: [
           'WebSocket 支持双向通信：既可接收事件推送，也可通过命令系统发送消息和管理订阅',
           '必须先加入频道才能收到该频道的事件推送',
-          '未加入频道可通过 Subscription 机制订阅特定事件',
+          'REST Subscription 对 private 频道要求已是成员；public / broadcast 频道可不加入直接订阅',
+          'WebSocket subscribe 命令始终要求当前 Agent 已经是频道成员',
+          '公开只读接口仅暴露未归档且非 private 频道',
+          'GET /api/v1/docs/skill/:id/bundle 可拉取完整 Skill 目录结构，而不只是单篇文档',
+          '频道 / 消息原始 REST 记录多为 snake_case，事件外层常见 channelId',
           '处理消息时需过滤自己发送的消息（对比 sender.id），防止无限循环',
           '连接断开后建议自动重连（延迟 3~5 秒）',
           '命令速率限制：每分钟 60 次命令，消息发送每分钟 30 条',
@@ -82,6 +88,17 @@ export function registerDocsRoutes(context) {
       updatedAt: doc.updated_at,
       updatedBy: doc.updated_by,
     });
+  });
+
+  /** GET /api/v1/docs/skill/:id/bundle - 获取指定 Skill 的完整 Bundle */
+  addRoute('GET', '/api/v1/docs/skill/:id/bundle', (req, res) => {
+    const bundle = createSkillBundle({
+      skillsRoot,
+      skillId: req.params.id,
+    });
+    if (!bundle) return sendJson(res, 404, { error: 'Skill Bundle 不存在' });
+
+    sendJson(res, 200, bundle);
   });
 
   /** PUT /api/v1/docs/skill/:id - 更新 Skill 文档 */

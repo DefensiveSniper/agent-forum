@@ -1,13 +1,14 @@
 /**
- * AgentForum E2E 测试 v3 - 验证第三轮审查修复
- * 覆盖：私有频道权限、归档频道写保护、邀请码 maxUses=0 无限次、核心流程
+ * AgentForum E2E 测试 v4 - 验证权限修复与 Skill Bundle API
+ * 覆盖：Skill Bundle 拉取、私有频道权限、归档频道写保护、邀请码 maxUses=0 无限次、核心流程
  */
 import http from 'http';
 
-const BASE = 'http://localhost:3000';
+const BASE = process.env.FORUM_BASE || 'http://localhost:3000';
 let adminToken = '';
 let agent1Key = '', agent1Id = '';
 let agent2Key = '', agent2Id = '';
+let agent3Key = '', agent3Id = '';
 let inviteCode = '';
 let passed = 0;
 let failed = 0;
@@ -40,13 +41,25 @@ function assert(condition, msg) {
 }
 
 async function run() {
-  console.log('\n🧪 AgentForum E2E Tests v3\n');
+  console.log('\n🧪 AgentForum E2E Tests v4\n');
 
   // === Setup ===
   console.log('📌 Setup');
   let r = await request('POST', '/api/v1/admin/login', { username: 'admin', password: 'admin123' });
   adminToken = r.data.token;
   assert(!!adminToken, 'Admin login ok');
+
+  console.log('\n📌 0. Skill Bundle API');
+  r = await request('GET', '/api/v1/docs/skill/agent-forum/bundle');
+  assert(r.status === 200, 'Skill bundle endpoint is accessible');
+  assert(r.data.id === 'agent-forum', 'Skill bundle returns correct skill id');
+  assert(typeof r.data.bundleSha256 === 'string' && r.data.bundleSha256.length > 0, 'Skill bundle returns bundle hash');
+  assert(Array.isArray(r.data.files) && r.data.files.length > 0, 'Skill bundle returns files');
+  assert(r.data.manifest.entrypoint === 'SKILL.md', 'Skill bundle manifest exposes entrypoint');
+  assert(r.data.files.some(f => f.path === 'references/rest-api.md'), 'Skill bundle includes references');
+  assert(r.data.files.some(f => f.path === 'scripts/agent-client.ts'), 'Skill bundle includes scripts');
+  assert(r.data.files.some(f => f.path === 'agents/openai.yaml'), 'Skill bundle includes agents metadata');
+  assert(!r.data.files.some(f => f.path.includes('.DS_Store')), 'Skill bundle excludes hidden files');
 
   // === 1. maxUses=0 means unlimited ===
   console.log('\n📌 1. Invite Code maxUses=0 = unlimited');
@@ -67,6 +80,11 @@ async function run() {
 
   r = await request('POST', '/api/v1/agents/register', { name: 'Agent3', inviteCode });
   assert(r.status === 201, 'Third registration with unlimited code succeeds (truly unlimited)');
+  agent3Id = r.data.agent.id;
+
+  r = await request('POST', `/api/v1/admin/agents/${agent3Id}/rotate-key`, null, { Authorization: `Bearer ${adminToken}` });
+  agent3Key = r.data.apiKey;
+  assert(!!agent3Key, 'Rotate Agent3 key for downstream access-control tests');
 
   // Also verify max_uses=1 invite works correctly
   r = await request('POST', '/api/v1/admin/invites', { label: 'single-use', maxUses: 1 }, { Authorization: `Bearer ${adminToken}` });
@@ -103,13 +121,39 @@ async function run() {
   r = await request('GET', '/api/v1/channels', null, { Authorization: `Bearer ${agent1Key}` });
   assert(r.data.some(c => c.id === privateChId), 'Agent1 (owner) sees private channel in list');
 
+  // Public endpoints must not leak private channels
+  r = await request('GET', '/api/v1/public/channels', null);
+  assert(r.status === 200, 'Public channel list is accessible');
+  assert(!r.data.some(c => c.id === privateChId), 'Public channel list does NOT expose private channel');
+
+  r = await request('GET', `/api/v1/public/channels/${privateChId}`, null);
+  assert(r.status === 404, 'Public channel detail does NOT expose private channel');
+
+  r = await request('GET', `/api/v1/public/channels/${privateChId}/messages`, null);
+  assert(r.status === 404, 'Public message history does NOT expose private channel');
+
   // Agent2 tries to view private channel detail - should be blocked
   r = await request('GET', `/api/v1/channels/${privateChId}`, null, { Authorization: `Bearer ${agent2Key}` });
   assert(r.status === 403, 'Agent2 cannot view private channel detail');
 
+  // Agent3 cannot enumerate private members or subscribe before invitation
+  r = await request('GET', `/api/v1/channels/${privateChId}/members`, null, { Authorization: `Bearer ${agent3Key}` });
+  assert(r.status === 403, 'Agent3 cannot list private channel members');
+
   // Agent2 tries to join private channel - should be blocked
   r = await request('POST', `/api/v1/channels/${privateChId}/join`, {}, { Authorization: `Bearer ${agent2Key}` });
   assert(r.status === 403 && r.data.error.includes('Private'), 'Agent2 cannot self-join private channel');
+
+  // Owner can send a message, but outsiders still cannot read it via message detail endpoint
+  r = await request('POST', `/api/v1/channels/${privateChId}/messages`, { content: 'secret hello' }, { Authorization: `Bearer ${agent1Key}` });
+  assert(r.status === 201, 'Owner can send message in private channel');
+  const privateMsgId = r.data.id;
+
+  r = await request('GET', `/api/v1/channels/${privateChId}/messages/${privateMsgId}`, null, { Authorization: `Bearer ${agent3Key}` });
+  assert(r.status === 403, 'Agent3 cannot read a private channel message by id');
+
+  r = await request('POST', '/api/v1/subscriptions', { channelId: privateChId, eventTypes: ['message.new'] }, { Authorization: `Bearer ${agent3Key}` });
+  assert(r.status === 403, 'Agent3 cannot subscribe to private channel events');
 
   // Agent1 (owner) invites Agent2 into private channel
   r = await request('POST', `/api/v1/channels/${privateChId}/invite`, { agentId: agent2Id }, { Authorization: `Bearer ${agent1Key}` });
@@ -125,6 +169,14 @@ async function run() {
   // Agent2 can join public channel normally
   r = await request('POST', `/api/v1/channels/${publicChId}/join`, {}, { Authorization: `Bearer ${agent2Key}` });
   assert(r.status === 200, 'Agent2 can join public channel');
+
+  // Agent3 can subscribe to public channel without joining, and list response uses camelCase
+  r = await request('POST', '/api/v1/subscriptions', { channelId: publicChId, eventTypes: ['message.new'] }, { Authorization: `Bearer ${agent3Key}` });
+  assert(r.status === 201, 'Agent3 can subscribe to public channel without joining');
+
+  r = await request('GET', '/api/v1/subscriptions', null, { Authorization: `Bearer ${agent3Key}` });
+  assert(r.status === 200, 'Agent3 can list subscriptions');
+  assert(Array.isArray(r.data) && r.data.some(s => s.channelId === publicChId && Array.isArray(s.eventTypes)), 'Subscription list returns camelCase fields');
 
   // === 3. Archived Channel Write Protection ===
   console.log('\n📌 3. Archived Channel Write Protection');
@@ -142,12 +194,6 @@ async function run() {
   assert(r.status === 403 && r.data.error.includes('archived'), 'Archived channel: message blocked');
 
   // Try to join archived channel with a new agent
-  const agent3 = await request('GET', '/api/v1/admin/agents', null, { Authorization: `Bearer ${adminToken}` });
-  const agent3Info = agent3.data.find(a => a.name === 'Agent3');
-  // We need Agent3's key - let's rotate it to get a known key
-  r = await request('POST', `/api/v1/admin/agents/${agent3Info.id}/rotate-key`, null, { Authorization: `Bearer ${adminToken}` });
-  const agent3Key = r.data.apiKey;
-
   r = await request('POST', `/api/v1/channels/${publicChId}/join`, {}, { Authorization: `Bearer ${agent3Key}` });
   assert(r.status === 403 && r.data.error.includes('archived'), 'Archived channel: join blocked');
 

@@ -147,6 +147,7 @@ export function startServer({ serverRoot }) {
     router,
     ws,
     tryParseJson,
+    skillsRoot: path.join(serverRoot, '../skills'),
   });
 
   const server = http.createServer(async (req, res) => {

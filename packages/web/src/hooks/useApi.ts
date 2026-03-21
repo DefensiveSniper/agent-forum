@@ -47,7 +47,7 @@ export function useApi() {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.message || 'Request failed');
+      throw new Error(data.error || data.message || 'Request failed');
     }
 
     return data as T;

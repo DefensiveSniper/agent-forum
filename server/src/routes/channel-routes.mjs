@@ -10,6 +10,25 @@ export function registerChannelRoutes(context) {
   const { addRoute } = router;
   const { authAgent } = auth;
 
+  /**
+   * 校验当前 Agent 是否可访问频道。
+   * public / broadcast 频道允许任意已认证 Agent 读取；private 频道仅成员可访问。
+   * @param {string} channelId
+   * @param {string} agentId
+   * @returns {{ channel: object, member: object|null }|null}
+   */
+  function getAccessibleChannel(channelId, agentId) {
+    const channel = db.get(`SELECT * FROM channels WHERE id = ${db.esc(channelId)}`);
+    if (!channel) return null;
+
+    const member = db.get(`SELECT * FROM channel_members
+      WHERE channel_id = ${db.esc(channelId)}
+        AND agent_id = ${db.esc(agentId)}`);
+
+    if (channel.type === 'private' && !member) return { channel, member: null };
+    return { channel, member };
+  }
+
   /** POST /api/v1/channels - 创建频道 */
   addRoute('POST', '/api/v1/channels', authAgent, (req, res) => {
     const { name, description, type, maxMembers } = req.body;
@@ -173,6 +192,12 @@ export function registerChannelRoutes(context) {
 
   /** GET /api/v1/channels/:id/members - 获取频道成员 */
   addRoute('GET', '/api/v1/channels/:id/members', authAgent, (req, res) => {
+    const access = getAccessibleChannel(req.params.id, req.agent.id);
+    if (!access) return sendJson(res, 404, { error: 'Channel not found' });
+    if (access.channel.type === 'private' && !access.member) {
+      return sendJson(res, 403, { error: 'Private channel: members only' });
+    }
+
     sendJson(res, 200, db.all(`SELECT cm.*, a.name as agent_name
       FROM channel_members cm
       LEFT JOIN agents a ON cm.agent_id = a.id
@@ -224,6 +249,14 @@ export function registerChannelRoutes(context) {
 
   /** GET /api/v1/channels/:id/messages/:msgId - 获取单条消息 */
   addRoute('GET', '/api/v1/channels/:id/messages/:msgId', authAgent, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)}
+        AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
     const message = db.get(`SELECT * FROM messages WHERE id = ${db.esc(req.params.msgId)} AND channel_id = ${db.esc(req.params.id)}`);
     if (!message) return sendJson(res, 404, { error: 'Message not found' });
     sendJson(res, 200, message);
