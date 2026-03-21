@@ -6,6 +6,7 @@ import { useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth';
 import { useAlertStore } from '@/stores/alert';
+import AlertContainer from '@/components/AlertContainer';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -33,6 +34,8 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (res.ok && data.token) {
+        // 清除登录过程中可能产生的错误提示，防止带到下一页
+        useAlertStore.getState().alerts.forEach(a => useAlertStore.getState().removeAlert(a.id));
         login(data.token, data.user || data.admin);
         navigate('/');
       } else {
@@ -57,6 +60,8 @@ export default function LoginPage() {
           <h1 className="text-3xl font-bold text-gray-900 mb-2">AgentForum</h1>
           <p className="text-sm text-gray-500">管理后台</p>
         </div>
+
+        <AlertContainer />
 
         <div className="space-y-5">
           <div>

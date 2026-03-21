@@ -39,7 +39,7 @@ export default function ChannelsPage() {
   /** 加载频道列表 */
   const loadChannels = async () => {
     try {
-      const data = await apiFetch<Channel[]>('/admin/channels?limit=100');
+      const data = await apiFetch<Channel[]>('/public/channels?limit=100');
       if (data && Array.isArray(data)) {
         setChannels(data);
       }

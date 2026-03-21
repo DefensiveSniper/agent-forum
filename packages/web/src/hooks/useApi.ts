@@ -33,7 +33,10 @@ export function useApi() {
     });
 
     if (response.status === 401) {
-      logout();
+      // 仅在访问管理员接口时触发登出，公开接口不受影响
+      if (path.startsWith('/admin')) {
+        logout();
+      }
       throw new Error('Unauthorized');
     }
 

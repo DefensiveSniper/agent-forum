@@ -4,8 +4,9 @@
  */
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Hash, Send } from 'lucide-react';
+import { ArrowLeft, Users, Hash, Send, Reply, X } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
+import { useAuthStore } from '@/stores/auth';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import EmptyState from '@/components/EmptyState';
 import StatusBadge from '@/components/StatusBadge';
@@ -15,6 +16,7 @@ interface Member {
   agent_id: string;
   agent_name: string;
   agent_status: 'active' | 'suspended';
+  online: boolean;
   role: 'owner' | 'admin' | 'member';
   joined_at: string;
 }
@@ -96,6 +98,7 @@ export default function ChannelDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { apiFetch } = useApi();
+  const { isAuthenticated } = useAuthStore();
   const [channel, setChannel] = useState<ChannelDetail | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -104,13 +107,15 @@ export default function ChannelDetailPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [comment, setComment] = useState('');
   const [sending, setSending] = useState(false);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /** 加载频道详情（含成员） */
   const loadChannel = useCallback(async () => {
     try {
-      const data = await apiFetch<ChannelDetail>(`/admin/channels/${id}`);
+      const data = await apiFetch<ChannelDetail>(`/public/channels/${id}`);
       if (data) setChannel(data);
     } catch {
       // 错误在 useApi 中处理
@@ -121,7 +126,7 @@ export default function ChannelDetailPage() {
   const loadMessages = useCallback(async (loadCursor?: string) => {
     if (loadCursor) setLoadingMore(true);
     try {
-      let path = `/admin/channels/${id}/messages?limit=50`;
+      let path = `/public/channels/${id}/messages?limit=50`;
       if (loadCursor) path += `&cursor=${loadCursor}`;
       const res = await apiFetch<MessagesResponse>(path);
       if (res) {
@@ -155,8 +160,9 @@ export default function ChannelDetailPage() {
     }
   }, [loading]);
 
-  /** 监听 WebSocket 新消息事件，实时追加 */
+  /** 监听 WebSocket 事件：新消息、成员变动、在线状态 */
   useWebSocket((event) => {
+    // 新消息 → 追加到消息列表
     if (event.type === 'message.new' && event.channelId === id) {
       const payload = event.payload as { message: Message; sender: { id: string; name: string } };
       const newMsg: Message = {
@@ -164,10 +170,66 @@ export default function ChannelDetailPage() {
         sender_name: payload.sender.name,
       };
       setMessages((prev) => [...prev, newMsg]);
-      // 自动滚动到底部
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
     }
+
+    // Agent 上线 → 更新成员在线状态
+    if (event.type === 'agent.online') {
+      const { agentId } = event.payload as { agentId: string };
+      setChannel((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          members: prev.members.map((m) =>
+            m.agent_id === agentId ? { ...m, online: true } : m
+          ),
+        };
+      });
+    }
+
+    // Agent 离线 → 更新成员在线状态
+    if (event.type === 'agent.offline') {
+      const { agentId } = event.payload as { agentId: string };
+      setChannel((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          members: prev.members.map((m) =>
+            m.agent_id === agentId ? { ...m, online: false } : m
+          ),
+        };
+      });
+    }
+
+    // 成员加入 → 重新加载频道详情
+    if (event.type === 'member.joined' && event.channelId === id) {
+      loadChannel();
+    }
+
+    // 成员离开 → 重新加载频道详情
+    if (event.type === 'member.left' && event.channelId === id) {
+      loadChannel();
+    }
   });
+
+  /**
+   * 点击回复按钮，设置回复目标并预填 @agentname
+   * 触发 agent 的 WS 监听逻辑（bridge 根据 @mention 判断是否响应）
+   */
+  const handleReply = (msg: Message) => {
+    setReplyTo(msg);
+    const senderName = msg.sender_name || msg.sender_id.substring(0, 8);
+    // 预填 @agentname 以触发 agent bridge 的响应规则
+    setComment(`@${senderName} `);
+    // 聚焦输入框
+    setTimeout(() => textareaRef.current?.focus(), 50);
+  };
+
+  /** 取消回复 */
+  const handleCancelReply = () => {
+    setReplyTo(null);
+    setComment('');
+  };
 
   /** 管理员发送评论 */
   const handleSendComment = async () => {
@@ -177,9 +239,14 @@ export default function ChannelDetailPage() {
     try {
       await apiFetch(`/admin/channels/${id}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ content: trimmed, contentType: 'text' }),
+        body: JSON.stringify({
+          content: trimmed,
+          contentType: 'text',
+          replyTo: replyTo?.id || null,
+        }),
       });
       setComment('');
+      setReplyTo(null);
       // 新消息会通过 WebSocket 推送，无需手动追加
     } catch {
       // 错误在 useApi 中处理
@@ -297,13 +364,23 @@ export default function ChannelDetailPage() {
                           </span>
                         </div>
                       )}
-                      <div className={`text-sm text-gray-800 leading-relaxed ${compact ? '' : 'pl-11'}`}>
+                      <div className={`text-sm text-gray-800 leading-relaxed ${compact ? '' : 'pl-11'} relative`}>
                         {msg.reply_to && (
                           <div className="text-xs text-gray-400 border-l-2 border-gray-300 pl-2 mb-1">
                             回复消息
                           </div>
                         )}
                         {renderContent(msg.content, msg.content_type)}
+                        {/* 回复按钮：仅管理员登录后对非管理员消息显示，hover 时可见 */}
+                        {isAuthenticated && !isAdmin && channel.is_archived !== 1 && (
+                          <button
+                            onClick={() => handleReply(msg)}
+                            className="absolute -right-1 top-0 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-primary-600"
+                            title={`回复 ${msg.sender_name || msg.sender_id.substring(0, 8)}，触发 Agent 回复`}
+                          >
+                            <Reply size={14} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -313,16 +390,34 @@ export default function ChannelDetailPage() {
             )}
           </div>
 
-          {/* 管理员评论输入框 */}
-          {channel.is_archived !== 1 && (
+          {/* 管理员评论输入框（仅登录后显示） */}
+          {isAuthenticated && channel.is_archived !== 1 && (
             <div className="border-t border-gray-200 bg-white px-6 py-3 shrink-0">
+              {/* 回复指示条 */}
+              {replyTo && (
+                <div className="flex items-center gap-2 mb-2 px-3 py-1.5 rounded-md bg-primary-50 border border-primary-200 text-sm">
+                  <Reply size={14} className="text-primary-500 shrink-0" />
+                  <span className="text-primary-700 truncate">
+                    回复 <span className="font-semibold">{replyTo.sender_name || replyTo.sender_id.substring(0, 8)}</span>
+                    <span className="text-primary-400 ml-2">— {replyTo.content.substring(0, 60)}{replyTo.content.length > 60 ? '...' : ''}</span>
+                  </span>
+                  <button
+                    onClick={handleCancelReply}
+                    className="ml-auto p-0.5 rounded hover:bg-primary-100 text-primary-400 hover:text-primary-600 shrink-0"
+                    title="取消回复"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
               <div className="flex items-end gap-3">
                 <div className="flex-1">
                   <textarea
+                    ref={textareaRef}
                     value={comment}
                     onChange={(e) => setComment(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="以管理员身份发送评论… (Ctrl+Enter 发送)"
+                    placeholder={replyTo ? `回复 ${replyTo.sender_name || replyTo.sender_id.substring(0, 8)}，触发 Agent WS 回复… (Ctrl+Enter 发送)` : '以管理员身份发送评论… (Ctrl+Enter 发送)'}
                     rows={2}
                     className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder-gray-400"
                   />
@@ -371,7 +466,7 @@ export default function ChannelDetailPage() {
                         {roleLabels[m.role] || m.role}
                       </span>
                       <StatusBadge
-                        status={m.agent_status === 'suspended' ? 'suspended' : 'online'}
+                        status={m.agent_status === 'suspended' ? 'suspended' : m.online ? 'online' : 'offline'}
                       />
                     </div>
                   </div>

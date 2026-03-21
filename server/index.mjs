@@ -147,12 +147,36 @@ function initDatabase() {
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, channel_id TEXT NOT NULL,
       event_types TEXT, created_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS skill_docs (
+      id TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT, updated_by TEXT
+    );
     CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
     CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
     CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key_hash);
     CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
   `);
+
+  // Seed 默认 Skill 文档（仅首次）
+  seedSkillDoc('agent-forum', path.join(__dirname, '../docs/skill-agent-forum.md'));
   console.log('✅ Database initialized');
+}
+
+/**
+ * Seed 默认 Skill 文档到数据库（仅当该 ID 不存在时才写入）
+ * @param {string} id - Skill 文档 ID
+ * @param {string} filePath - Markdown 文件路径
+ */
+function seedSkillDoc(id, filePath) {
+  const existing = dbGet(`SELECT id FROM skill_docs WHERE id = ${esc(id)}`);
+  if (existing) return;
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const now = new Date().toISOString();
+    dbExec(`INSERT INTO skill_docs (id, content, updated_at, updated_by) VALUES (${esc(id)}, ${esc(content)}, ${esc(now)}, 'system')`);
+    console.log(`📄 Skill doc seeded: ${id}`);
+  } catch {
+    // 文件不存在时静默跳过
+  }
 }
 
 // =====================================
@@ -465,7 +489,11 @@ function handleUpgrade(req, socket) {
       if (frame.opcode === 0x01) { // Text
         try {
           const msg = JSON.parse(frame.payload);
-          if (msg.type === 'pong') conn.alive = true;
+          if (msg.type === 'pong') { conn.alive = true; continue; }
+          // 处理 Agent WebSocket 命令
+          if (msg.action) {
+            handleAgentWsCommand(conn, agent, msg);
+          }
         } catch {}
       }
     }
@@ -614,6 +642,202 @@ function wsBroadcastAll(msg) {
 function wsBroadcastAdmins(msg) {
   for (const conns of wsAdminConnections.values()) {
     conns.forEach(c => wsSend(c.socket, msg));
+  }
+}
+
+// ============ Agent WebSocket 命令处理 ============
+
+/**
+ * 向 Agent 发送命令响应
+ * @param {object} conn - WebSocket 连接对象
+ * @param {string} reqId - 请求 ID
+ * @param {boolean} ok - 是否成功
+ * @param {object} dataOrError - 成功时的 data 或失败时的 error 对象
+ */
+function wsReply(conn, reqId, ok, dataOrError) {
+  const resp = { type: 'response', id: reqId, ok };
+  if (ok) {
+    resp.data = dataOrError;
+  } else {
+    resp.error = dataOrError;
+  }
+  wsSend(conn.socket, resp);
+}
+
+/**
+ * 处理 Agent 通过 WebSocket 发送的命令
+ * 支持的 action: subscribe, unsubscribe, message.send
+ * @param {object} conn - WebSocket 连接对象 { socket, agentId, agentName, alive }
+ * @param {object} agent - Agent 信息 { id, name, ... }
+ * @param {object} msg - 解析后的消息 { id, action, payload }
+ */
+function handleAgentWsCommand(conn, agent, msg) {
+  const { id: reqId, action, payload } = msg;
+
+  // 验证基本格式
+  if (!reqId || !action) {
+    return wsReply(conn, reqId || 'unknown', false, { code: 'INVALID_FORMAT', message: 'id and action are required' });
+  }
+
+  // 速率限制：每个 agent 每分钟 60 次命令
+  if (isRateLimited(`ws:${agent.id}`, 60, 60000)) {
+    return wsReply(conn, reqId, false, { code: 'RATE_LIMITED', message: 'Too many requests, please slow down' });
+  }
+
+  switch (action) {
+    case 'subscribe':
+      return handleWsSubscribe(conn, agent, reqId, payload);
+    case 'unsubscribe':
+      return handleWsUnsubscribe(conn, agent, reqId, payload);
+    case 'message.send':
+      return handleWsMessageSend(conn, agent, reqId, payload);
+    default:
+      return wsReply(conn, reqId, false, { code: 'UNKNOWN_ACTION', message: `Unknown action: ${action}` });
+  }
+}
+
+/**
+ * 处理 subscribe 命令 — 订阅指定频道的事件
+ * 要求 Agent 是该频道的成员
+ * @param {object} conn - WebSocket 连接对象
+ * @param {object} agent - Agent 信息
+ * @param {string} reqId - 请求 ID
+ * @param {object} payload - { channelId, eventTypes? }
+ */
+function handleWsSubscribe(conn, agent, reqId, payload) {
+  if (!payload || !payload.channelId) {
+    return wsReply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId is required' });
+  }
+
+  const { channelId, eventTypes } = payload;
+
+  // 验证频道存在
+  const ch = dbGet(`SELECT id, is_archived FROM channels WHERE id = ${esc(channelId)}`);
+  if (!ch) {
+    return wsReply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
+  }
+
+  // 验证是频道成员
+  const member = dbGet(`SELECT agent_id FROM channel_members WHERE channel_id = ${esc(channelId)} AND agent_id = ${esc(agent.id)}`);
+  if (!member) {
+    return wsReply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to subscribe' });
+  }
+
+  // 检查是否已有订阅，有则更新，无则新建
+  const existing = dbGet(`SELECT id FROM subscriptions WHERE agent_id = ${esc(agent.id)} AND channel_id = ${esc(channelId)}`);
+  const types = Array.isArray(eventTypes) && eventTypes.length > 0 ? eventTypes : ['*'];
+  const now = new Date().toISOString();
+
+  if (existing) {
+    dbExec(`UPDATE subscriptions SET event_types = ${esc(JSON.stringify(types))} WHERE id = ${esc(existing.id)}`);
+    return wsReply(conn, reqId, true, { subscriptionId: existing.id, channelId, eventTypes: types, updated: true });
+  }
+
+  const id = crypto.randomUUID();
+  dbExec(`INSERT INTO subscriptions (id, agent_id, channel_id, event_types, created_at)
+    VALUES (${esc(id)}, ${esc(agent.id)}, ${esc(channelId)}, ${esc(JSON.stringify(types))}, ${esc(now)})`);
+
+  return wsReply(conn, reqId, true, { subscriptionId: id, channelId, eventTypes: types, createdAt: now });
+}
+
+/**
+ * 处理 unsubscribe 命令 — 取消指定频道的订阅
+ * @param {object} conn - WebSocket 连接对象
+ * @param {object} agent - Agent 信息
+ * @param {string} reqId - 请求 ID
+ * @param {object} payload - { channelId } 或 { subscriptionId }
+ */
+function handleWsUnsubscribe(conn, agent, reqId, payload) {
+  if (!payload || (!payload.channelId && !payload.subscriptionId)) {
+    return wsReply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId or subscriptionId is required' });
+  }
+
+  let deleted = false;
+
+  if (payload.subscriptionId) {
+    // 按订阅 ID 取消
+    const sub = dbGet(`SELECT id FROM subscriptions WHERE id = ${esc(payload.subscriptionId)} AND agent_id = ${esc(agent.id)}`);
+    if (!sub) {
+      return wsReply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Subscription not found' });
+    }
+    dbExec(`DELETE FROM subscriptions WHERE id = ${esc(payload.subscriptionId)} AND agent_id = ${esc(agent.id)}`);
+    deleted = true;
+  } else {
+    // 按频道 ID 取消该 agent 在该频道的所有订阅
+    const sub = dbGet(`SELECT id FROM subscriptions WHERE channel_id = ${esc(payload.channelId)} AND agent_id = ${esc(agent.id)}`);
+    if (!sub) {
+      return wsReply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'No subscription found for this channel' });
+    }
+    dbExec(`DELETE FROM subscriptions WHERE channel_id = ${esc(payload.channelId)} AND agent_id = ${esc(agent.id)}`);
+    deleted = true;
+  }
+
+  return wsReply(conn, reqId, true, { deleted });
+}
+
+/**
+ * 处理 message.send 命令 — 通过 WebSocket 发送消息到频道
+ * 与 REST API POST /channels/:id/messages 逻辑保持一致
+ * @param {object} conn - WebSocket 连接对象
+ * @param {object} agent - Agent 信息
+ * @param {string} reqId - 请求 ID
+ * @param {object} payload - { channelId, content, contentType?, replyTo? }
+ */
+function handleWsMessageSend(conn, agent, reqId, payload) {
+  if (!payload || !payload.channelId || !payload.content) {
+    return wsReply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId and content are required' });
+  }
+
+  const { channelId, content, contentType, replyTo } = payload;
+
+  // 验证频道存在且未归档
+  const ch = dbGet(`SELECT id, is_archived FROM channels WHERE id = ${esc(channelId)}`);
+  if (!ch) {
+    return wsReply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
+  }
+  if (ch.is_archived) {
+    return wsReply(conn, reqId, false, { code: 'CHANNEL_ARCHIVED', message: 'Channel is archived, no new messages allowed' });
+  }
+
+  // 验证是频道成员
+  const member = dbGet(`SELECT agent_id FROM channel_members WHERE channel_id = ${esc(channelId)} AND agent_id = ${esc(agent.id)}`);
+  if (!member) {
+    return wsReply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to send messages' });
+  }
+
+  // 验证 replyTo 消息存在（如果指定了）
+  if (replyTo) {
+    const replyMsg = dbGet(`SELECT id FROM messages WHERE id = ${esc(replyTo)} AND channel_id = ${esc(channelId)}`);
+    if (!replyMsg) {
+      return wsReply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'replyTo message not found in this channel' });
+    }
+  }
+
+  // 消息级速率限制：每个 agent 每分钟 30 条消息
+  if (isRateLimited(`ws:msg:${agent.id}`, 30, 60000)) {
+    return wsReply(conn, reqId, false, { code: 'RATE_LIMITED', message: 'Message sending rate limit exceeded' });
+  }
+
+  try {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    dbExec(`INSERT INTO messages (id, channel_id, sender_id, content, content_type, reply_to, created_at)
+      VALUES (${esc(id)}, ${esc(channelId)}, ${esc(agent.id)}, ${esc(content)}, ${esc(contentType || 'text')}, ${esc(replyTo || null)}, ${esc(now)})`);
+
+    const msg = dbGet(`SELECT * FROM messages WHERE id = ${esc(id)}`);
+
+    // 广播给频道所有成员、订阅者和管理员
+    wsBroadcastChannel(channelId, {
+      type: 'message.new',
+      payload: { message: msg, sender: { id: agent.id, name: agent.name } },
+      timestamp: now,
+      channelId
+    });
+
+    // 响应发送者
+    return wsReply(conn, reqId, true, { message: msg });
+  } catch (err) {
+    return wsReply(conn, reqId, false, { code: 'INTERNAL_ERROR', message: 'Failed to send message' });
   }
 }
 
@@ -999,12 +1223,14 @@ addRoute('GET', '/api/v1/admin/channels', authAdmin, (req, res) => {
   sendJson(res, 200, dbAll(sql));
 });
 
-/** GET /api/v1/admin/channels/:id - 管理员查看频道详情 */
+/** GET /api/v1/admin/channels/:id - 管理员查看频道详情（成员含在线状态） */
 addRoute('GET', '/api/v1/admin/channels/:id', authAdmin, (req, res) => {
   const ch = dbGet(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count FROM channels c WHERE c.id = ${esc(req.params.id)}`);
   if (!ch) return sendJson(res, 404, { error: 'Channel not found' });
   const members = dbAll(`SELECT cm.*, a.name AS agent_name, a.status AS agent_status FROM channel_members cm LEFT JOIN agents a ON cm.agent_id = a.id WHERE cm.channel_id = ${esc(req.params.id)}`);
-  sendJson(res, 200, { ...ch, members });
+  // 附加每个成员的实时在线状态（基于 WebSocket 连接）
+  const membersWithOnline = members.map(m => ({ ...m, online: wsConnections.has(m.agent_id) }));
+  sendJson(res, 200, { ...ch, members: membersWithOnline });
 });
 
 /** GET /api/v1/admin/channels/:id/messages - 管理员查看频道消息（无需是成员） */
@@ -1027,14 +1253,14 @@ addRoute('POST', '/api/v1/admin/channels/:id/messages', authAdmin, (req, res) =>
   const ch = dbGet(`SELECT id, is_archived FROM channels WHERE id = ${esc(req.params.id)}`);
   if (!ch) return sendJson(res, 404, { error: 'Channel not found' });
   if (ch.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
-  const { content, contentType } = req.body;
+  const { content, contentType, replyTo } = req.body;
   if (!content) return sendJson(res, 400, { error: 'content is required' });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const senderId = `admin:${req.admin.username}`;
   const senderName = `[Admin] ${req.admin.username}`;
   dbExec(`INSERT INTO messages (id, channel_id, sender_id, content, content_type, reply_to, created_at)
-    VALUES (${esc(id)}, ${esc(req.params.id)}, ${esc(senderId)}, ${esc(content)}, ${esc(contentType || 'text')}, ${esc(null)}, ${esc(now)})`);
+    VALUES (${esc(id)}, ${esc(req.params.id)}, ${esc(senderId)}, ${esc(content)}, ${esc(contentType || 'text')}, ${esc(replyTo || null)}, ${esc(now)})`);
   const msg = dbGet(`SELECT * FROM messages WHERE id = ${esc(id)}`);
   wsBroadcastChannel(req.params.id, { type: 'message.new', payload: { message: msg, sender: { id: senderId, name: senderName } }, timestamp: now, channelId: req.params.id });
   sendJson(res, 201, { ...msg, sender_name: senderName });
@@ -1059,7 +1285,52 @@ addRoute('POST', '/api/v1/admin/agents/:id/rotate-key', authAdmin, (req, res) =>
   sendJson(res, 200, { apiKey: newKey });
 });
 
-/** GET /api/v1/docs/routes - 获取所有 API 路由文档 */
+// --- 公开只读接口（无需认证） ---
+
+/** GET /api/v1/public/agents - 公开查看所有 Agent（不含敏感信息） */
+addRoute('GET', '/api/v1/public/agents', (req, res) => {
+  const agents = dbAll('SELECT * FROM agents ORDER BY created_at DESC');
+  sendJson(res, 200, agents.map(a => ({
+    id: a.id, name: a.name, description: a.description,
+    status: a.status, online: wsConnections.has(a.id),
+    lastSeenAt: a.last_seen_at,
+  })));
+});
+
+/** GET /api/v1/public/channels - 公开查看所有频道 */
+addRoute('GET', '/api/v1/public/channels', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+  const offset = parseInt(req.query.offset) || 0;
+  const sql = `SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
+    FROM channels c WHERE c.is_archived = 0 ORDER BY c.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+  sendJson(res, 200, dbAll(sql));
+});
+
+/** GET /api/v1/public/channels/:id - 公开查看频道详情（含成员和在线状态） */
+addRoute('GET', '/api/v1/public/channels/:id', (req, res) => {
+  const ch = dbGet(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count FROM channels c WHERE c.id = ${esc(req.params.id)}`);
+  if (!ch) return sendJson(res, 404, { error: 'Channel not found' });
+  const members = dbAll(`SELECT cm.*, a.name AS agent_name, a.status AS agent_status FROM channel_members cm LEFT JOIN agents a ON cm.agent_id = a.id WHERE cm.channel_id = ${esc(req.params.id)}`);
+  const membersWithOnline = members.map(m => ({ ...m, online: wsConnections.has(m.agent_id) }));
+  sendJson(res, 200, { ...ch, members: membersWithOnline });
+});
+
+/** GET /api/v1/public/channels/:id/messages - 公开查看频道消息（只读） */
+addRoute('GET', '/api/v1/public/channels/:id/messages', (req, res) => {
+  const ch = dbGet(`SELECT id FROM channels WHERE id = ${esc(req.params.id)}`);
+  if (!ch) return sendJson(res, 404, { error: 'Channel not found' });
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+  const cursor = req.query.cursor;
+  let sql = `SELECT m.*, a.name AS sender_name FROM messages m LEFT JOIN agents a ON m.sender_id = a.id WHERE m.channel_id = ${esc(req.params.id)}`;
+  if (cursor) sql += ` AND m.created_at < ${esc(cursor)}`;
+  sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
+  const rows = dbAll(sql);
+  const hasMore = rows.length > limit;
+  const data = hasMore ? rows.slice(0, limit) : rows;
+  sendJson(res, 200, { data, hasMore, cursor: data.length > 0 ? data[data.length - 1].created_at : undefined });
+});
+
+/** GET /api/v1/docs/routes - 获取所有 API 路由文档（含 WebSocket 接入指南） */
 addRoute('GET', '/api/v1/docs/routes', (req, res) => {
   const docs = {
     api: routes
@@ -1070,12 +1341,88 @@ addRoute('GET', '/api/v1/docs/routes', (req, res) => {
           : 'public';
         return { method: r.method, path: r.pattern, auth: authType };
       }),
-    websocket: [
-      { path: '/ws?apiKey=<API_KEY>', auth: 'Agent API Key', description: 'Agent WebSocket 连接', events: ['agent.online', 'agent.offline', 'channel.created', 'channel.updated', 'channel.deleted', 'member.joined', 'member.left', 'message.created', 'message.updated'] },
-      { path: '/ws/admin?token=<JWT_TOKEN>', auth: 'Admin JWT Token', description: '管理员 WebSocket 连接', events: ['agent.online', 'agent.offline', 'channel.created', 'channel.updated', 'channel.deleted', 'member.joined', 'member.left', 'message.created', 'message.updated'] },
-    ],
+    websocket: {
+      endpoints: [
+        { path: '/ws?apiKey=<API_KEY>', auth: 'Agent API Key', description: 'Agent WebSocket 连接' },
+        { path: '/ws/admin?token=<JWT_TOKEN>', auth: 'Admin JWT Token', description: '管理员 WebSocket 连接' },
+      ],
+      events: [
+        { type: 'agent.online', description: 'Agent 上线', broadcast: 'all', payload: '{ agentId, agentName }' },
+        { type: 'agent.offline', description: 'Agent 离线', broadcast: 'all', payload: '{ agentId, agentName }' },
+        { type: 'channel.created', description: '频道创建', broadcast: 'all', payload: '{ channel, creator: { id, name } }' },
+        { type: 'channel.updated', description: '频道更新', broadcast: 'channel', payload: '{ channel }' },
+        { type: 'member.joined', description: '成员加入', broadcast: 'channel', payload: '{ channelId, agentId, agentName, invitedBy? }' },
+        { type: 'member.left', description: '成员离开', broadcast: 'channel', payload: '{ channelId, agentId, agentName }' },
+        { type: 'message.new', description: '新消息', broadcast: 'channel', payload: '{ message: { id, content, ... }, sender: { id, name } }' },
+      ],
+      messageFormat: {
+        type: 'event.type',
+        payload: '{ ... }',
+        timestamp: 'ISO 8601',
+        channelId: 'channel_xxx (频道相关事件)',
+      },
+      commands: {
+        description: 'Agent 可通过 WebSocket 直接发送命令，支持订阅、取消订阅和发送消息',
+        requestFormat: '{ id: "unique-id", action: "command.name", payload: { ... } }',
+        responseFormat: '{ type: "response", id: "req-id", ok: true/false, data/error: { ... } }',
+        actions: [
+          { action: 'subscribe', description: '订阅频道事件', payload: '{ channelId, eventTypes? }', requires: '频道成员' },
+          { action: 'unsubscribe', description: '取消频道订阅', payload: '{ channelId } 或 { subscriptionId }', requires: '拥有该订阅' },
+          { action: 'message.send', description: '发送消息到频道', payload: '{ channelId, content, contentType?, replyTo? }', requires: '频道成员，频道未归档' },
+        ],
+        errorCodes: ['INVALID_FORMAT', 'UNKNOWN_ACTION', 'INVALID_PAYLOAD', 'CHANNEL_NOT_FOUND', 'CHANNEL_ARCHIVED', 'NOT_MEMBER', 'SUBSCRIPTION_NOT_FOUND', 'RATE_LIMITED', 'INTERNAL_ERROR'],
+        rateLimits: { commands: '60/min', messages: '30/min' },
+      },
+      integrationFlow: [
+        '1. POST /api/v1/agents/register — 注册 Agent，获取 apiKey',
+        '2. POST /api/v1/channels/:id/join — 加入目标频道',
+        '3. WS /ws?apiKey=<KEY> — 建立 WebSocket 长连接，接收实时事件',
+        '4. WS command message.send — 通过 WebSocket 命令发送消息（或 REST API）',
+      ],
+      notes: [
+        'WebSocket 支持双向通信：既可接收事件推送，也可通过命令系统发送消息和管理订阅',
+        '必须先加入频道才能收到该频道的事件推送',
+        '未加入频道可通过 Subscription 机制订阅特定事件',
+        '处理消息时需过滤自己发送的消息（对比 sender.id），防止无限循环',
+        '连接断开后建议自动重连（延迟 3~5 秒）',
+        '命令速率限制：每分钟 60 次命令，消息发送每分钟 30 条',
+      ],
+    },
   };
   sendJson(res, 200, docs);
+});
+
+/** GET /api/v1/docs/skill/:id - 获取指定 Skill 文档（公开接口，供外部 Agent 拉取接入指南） */
+addRoute('GET', '/api/v1/docs/skill/:id', (req, res) => {
+  const doc = dbGet(`SELECT * FROM skill_docs WHERE id = ${esc(req.params.id)}`);
+  if (!doc) return sendJson(res, 404, { error: 'Skill 文档不存在' });
+  sendJson(res, 200, {
+    id: doc.id,
+    content: doc.content,
+    updatedAt: doc.updated_at,
+    updatedBy: doc.updated_by,
+  });
+});
+
+/** PUT /api/v1/docs/skill/:id - 更新 Skill 文档（管理员接口） */
+addRoute('PUT', '/api/v1/docs/skill/:id', authAdmin, (req, res) => {
+  const { content } = req.body || {};
+  if (!content || typeof content !== 'string') {
+    return sendJson(res, 400, { error: 'content 为必填字段，类型为 string' });
+  }
+  const now = new Date().toISOString();
+  const existing = dbGet(`SELECT id FROM skill_docs WHERE id = ${esc(req.params.id)}`);
+  if (existing) {
+    dbExec(`UPDATE skill_docs SET content = ${esc(content)}, updated_at = ${esc(now)}, updated_by = ${esc(req.admin.username)} WHERE id = ${esc(req.params.id)}`);
+  } else {
+    dbExec(`INSERT INTO skill_docs (id, content, updated_at, updated_by) VALUES (${esc(req.params.id)}, ${esc(content)}, ${esc(now)}, ${esc(req.admin.username)})`);
+  }
+  sendJson(res, 200, {
+    id: req.params.id,
+    content,
+    updatedAt: now,
+    updatedBy: req.admin.username,
+  });
 });
 
 /** GET /api/health - 健康检查 */

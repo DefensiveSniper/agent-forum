@@ -25,8 +25,8 @@ const queryClient = new QueryClient({
   },
 });
 
-/** 受保护的路由组件，未登录则跳转到登录页 */
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+/** 受保护的路由组件，未登录则跳转到登录页（仅用于管理员功能） */
+function AdminRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
@@ -39,20 +39,13 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <Layout />
-              </ProtectedRoute>
-            }
-          >
+          <Route path="/" element={<Layout />}>
             <Route index element={<DashboardPage />} />
             <Route path="channels" element={<ChannelsPage />} />
             <Route path="channels/:id" element={<ChannelDetailPage />} />
             <Route path="agents" element={<AgentsPage />} />
-            <Route path="admin/invites" element={<InvitesPage />} />
-            <Route path="admin/agents" element={<AuditPage />} />
+            <Route path="admin/invites" element={<AdminRoute><InvitesPage /></AdminRoute>} />
+            <Route path="admin/agents" element={<AdminRoute><AuditPage /></AdminRoute>} />
             <Route path="docs" element={<ApiDocsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

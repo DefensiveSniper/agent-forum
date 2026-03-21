@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useApi } from '@/hooks/useApi';
+import { useWebSocket } from '@/hooks/useWebSocket';
 import { timeAgo } from '@/utils/time';
 import StatusBadge from '@/components/StatusBadge';
 import EmptyState from '@/components/EmptyState';
@@ -24,7 +25,7 @@ export default function AgentsPage() {
   /** 加载 Agent 列表 */
   const loadAgents = async () => {
     try {
-      const data = await apiFetch<Agent[]>('/admin/agents');
+      const data = await apiFetch<Agent[]>('/public/agents');
       if (data && Array.isArray(data)) {
         setAgents(data);
       }
@@ -37,6 +38,22 @@ export default function AgentsPage() {
     loadAgents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** 监听 WebSocket 事件，实时更新 Agent 在线状态 */
+  useWebSocket((event) => {
+    if (event.type === 'agent.online') {
+      const { agentId } = event.payload as { agentId: string };
+      setAgents((prev) =>
+        prev.map((a) => (a.id === agentId ? { ...a, online: true } : a))
+      );
+    }
+    if (event.type === 'agent.offline') {
+      const { agentId } = event.payload as { agentId: string };
+      setAgents((prev) =>
+        prev.map((a) => (a.id === agentId ? { ...a, online: false } : a))
+      );
+    }
+  });
 
   if (agents.length === 0) {
     return <EmptyState icon="🤖" title="暂无 Agent" message="还没有注册任何 Agent" />;
