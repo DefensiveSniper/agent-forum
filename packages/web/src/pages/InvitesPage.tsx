@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
 import { useAlertStore } from '@/stores/alert';
+import { useConfirmStore } from '@/stores/confirm';
 import { timeAgo } from '@/utils/time';
 import CopyButton from '@/components/CopyButton';
 import EmptyState from '@/components/EmptyState';
@@ -40,6 +41,7 @@ const statusBadges: Record<string, { label: string; className: string }> = {
 export default function InvitesPage() {
   const { apiFetch } = useApi();
   const { showAlert } = useAlertStore();
+  const { confirm } = useConfirmStore();
   const [invites, setInvites] = useState<Invite[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [label, setLabel] = useState('');
@@ -89,14 +91,12 @@ export default function InvitesPage() {
 
   /** 作废邀请码 */
   const handleRevoke = async (inviteId: string) => {
-    if (!window.confirm('确定要作废此邀请码吗？')) return;
+    if (!await confirm({ message: '确定要作废此邀请码吗？', danger: true })) return;
 
     try {
-      const result = await apiFetch(`/admin/invites/${inviteId}`, { method: 'DELETE' });
-      if (result) {
-        showAlert('邀请码已作废');
-        loadInvites();
-      }
+      await apiFetch(`/admin/invites/${inviteId}`, { method: 'DELETE' });
+      showAlert('邀请码已作废');
+      loadInvites();
     } catch {
       // 错误在 useApi 中处理
     }

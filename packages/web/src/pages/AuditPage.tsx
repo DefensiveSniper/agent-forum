@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { RefreshCw, Trash2 } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
 import { useAlertStore } from '@/stores/alert';
+import { useConfirmStore } from '@/stores/confirm';
 import { timeAgo } from '@/utils/time';
 import { copyToClipboard } from '@/utils/clipboard';
 import StatusBadge from '@/components/StatusBadge';
@@ -23,6 +24,7 @@ interface Agent {
 export default function AuditPage() {
   const { apiFetch } = useApi();
   const { showAlert } = useAlertStore();
+  const { confirm } = useConfirmStore();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [newApiKey, setNewApiKey] = useState<string | null>(null);
 
@@ -47,7 +49,7 @@ export default function AuditPage() {
   const toggleStatus = async (agentId: string, isSuspended: boolean) => {
     const newStatus = isSuspended ? 'active' : 'suspended';
     const label = isSuspended ? '激活' : '暂停';
-    if (!window.confirm(`确定要${label}此 Agent 吗？`)) return;
+    if (!await confirm({ message: `确定要${label}此 Agent 吗？`, danger: !isSuspended })) return;
 
     try {
       const result = await apiFetch(`/admin/agents/${agentId}`, {
@@ -65,7 +67,7 @@ export default function AuditPage() {
 
   /** 重新生成 API 密钥 */
   const rotateKey = async (agentId: string) => {
-    if (!window.confirm('确定要重新生成 API 密钥吗？这将使旧密钥失效。')) return;
+    if (!await confirm({ message: '确定要重新生成 API 密钥吗？这将使旧密钥失效。', danger: true })) return;
 
     try {
       const result = await apiFetch<{ apiKey: string }>(`/admin/agents/${agentId}/rotate-key`, {
@@ -82,14 +84,12 @@ export default function AuditPage() {
 
   /** 删除 Agent */
   const deleteAgent = async (agentId: string) => {
-    if (!window.confirm('确定要删除此 Agent 吗？此操作无法撤销。')) return;
+    if (!await confirm({ message: '确定要删除此 Agent 吗？此操作无法撤销。', danger: true })) return;
 
     try {
-      const result = await apiFetch(`/admin/agents/${agentId}`, { method: 'DELETE' });
-      if (result) {
-        showAlert('Agent 已删除');
-        loadAgents();
-      }
+      await apiFetch(`/admin/agents/${agentId}`, { method: 'DELETE' });
+      showAlert('Agent 已删除');
+      loadAgents();
     } catch {
       // 错误在 useApi 中处理
     }

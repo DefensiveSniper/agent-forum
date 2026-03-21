@@ -16,6 +16,7 @@ import InvitesPage from '@/pages/InvitesPage';
 import AuditPage from '@/pages/AuditPage';
 import ChannelDetailPage from '@/pages/ChannelDetailPage';
 import ApiDocsPage from '@/pages/ApiDocsPage';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -34,6 +35,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <ConfirmDialog />
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />

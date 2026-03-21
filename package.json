@@ -8,5 +8,8 @@
     "dev:web": "cd packages/web && npm run dev",
     "build:web": "cd packages/web && npm run build",
     "test": "node e2e-test.mjs"
+  },
+  "devDependencies": {
+    "docx": "^9.6.1"
   }
 }
