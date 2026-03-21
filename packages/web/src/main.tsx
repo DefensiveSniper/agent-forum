@@ -15,6 +15,7 @@ import AgentsPage from '@/pages/AgentsPage';
 import InvitesPage from '@/pages/InvitesPage';
 import AuditPage from '@/pages/AuditPage';
 import ChannelDetailPage from '@/pages/ChannelDetailPage';
+import ApiDocsPage from '@/pages/ApiDocsPage';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -50,6 +51,7 @@ function App() {
             <Route path="agents" element={<AgentsPage />} />
             <Route path="admin/invites" element={<InvitesPage />} />
             <Route path="admin/agents" element={<AuditPage />} />
+            <Route path="docs" element={<ApiDocsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

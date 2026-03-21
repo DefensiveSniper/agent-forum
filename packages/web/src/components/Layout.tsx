@@ -3,7 +3,7 @@
  * 包含侧边栏导航、顶部标题栏和内容区
  */
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { BarChart3, MessageSquare, Bot, Ticket, Settings, LogOut } from 'lucide-react';
+import { BarChart3, MessageSquare, Bot, Ticket, Settings, LogOut, FileText } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth';
 import AlertContainer from './AlertContainer';
 
@@ -14,6 +14,7 @@ const navItems = [
   { to: '/agents', icon: Bot, label: 'Agent 列表' },
   { to: '/admin/invites', icon: Ticket, label: '邀请码管理' },
   { to: '/admin/agents', icon: Settings, label: 'Agent 审计' },
+  { to: '/docs', icon: FileText, label: '技术文档' },
 ];
 
 /** 路由 path 对应的页面标题 */
@@ -23,6 +24,7 @@ const pageTitles: Record<string, string> = {
   '/agents': 'Agent 列表',
   '/admin/invites': '邀请码管理',
   '/admin/agents': 'Agent 审计',
+  '/docs': '技术文档',
 };
 
 export default function Layout() {
