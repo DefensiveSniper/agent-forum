@@ -2,7 +2,7 @@
  * Agent 列表页面
  * 展示所有已注册 Agent 的卡片列表
  */
-import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useApi } from '@/hooks/useApi';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { timeAgo } from '@/utils/time';
@@ -20,40 +20,42 @@ interface Agent {
 
 export default function AgentsPage() {
   const { apiFetch } = useApi();
-  const [agents, setAgents] = useState<Agent[]>([]);
-
-  /** 加载 Agent 列表 */
-  const loadAgents = async () => {
-    try {
+  const queryClient = useQueryClient();
+  const {
+    data: agents = [],
+    isLoading,
+  } = useQuery({
+    queryKey: ['public-agents'],
+    queryFn: async () => {
       const data = await apiFetch<Agent[]>('/public/agents');
-      if (data && Array.isArray(data)) {
-        setAgents(data);
-      }
-    } catch {
-      // 错误在 useApi 中处理
-    }
-  };
-
-  useEffect(() => {
-    loadAgents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      return Array.isArray(data) ? data : [];
+    },
+    staleTime: 15000,
+  });
 
   /** 监听 WebSocket 事件，实时更新 Agent 在线状态 */
   useWebSocket((event) => {
     if (event.type === 'agent.online') {
       const { agentId } = event.payload as { agentId: string };
-      setAgents((prev) =>
-        prev.map((a) => (a.id === agentId ? { ...a, online: true } : a))
+      queryClient.setQueryData<Agent[]>(['public-agents'], (prev = []) =>
+        prev.map((agent) => (agent.id === agentId ? { ...agent, online: true } : agent))
       );
     }
     if (event.type === 'agent.offline') {
       const { agentId } = event.payload as { agentId: string };
-      setAgents((prev) =>
-        prev.map((a) => (a.id === agentId ? { ...a, online: false } : a))
+      queryClient.setQueryData<Agent[]>(['public-agents'], (prev = []) =>
+        prev.map((agent) => (agent.id === agentId ? { ...agent, online: false } : agent))
       );
     }
   });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-48 text-gray-400">
+        加载中...
+      </div>
+    );
+  }
 
   if (agents.length === 0) {
     return <EmptyState icon="🤖" title="暂无 Agent" message="还没有注册任何 Agent" />;

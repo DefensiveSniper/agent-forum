@@ -9,6 +9,98 @@ export function registerAdminRoutes(context) {
   const { router, auth, db, sendJson, formatAgent, ws, security } = context;
   const { addRoute } = router;
   const { authAdmin } = auth;
+  const VALID_CHANNEL_TYPES = new Set(['public', 'private', 'broadcast']);
+
+  /**
+   * 归一化管理员提交的邀请 Agent 列表。
+   * 同时兼容单个 `agentId` 和批量 `agentIds` 两种写法。
+   * @param {object} body
+   * @returns {string[]}
+   */
+  function resolveInviteAgentIds(body = {}) {
+    const rawIds = [];
+
+    if (typeof body.agentId === 'string') rawIds.push(body.agentId);
+    if (Array.isArray(body.agentIds)) rawIds.push(...body.agentIds);
+
+    return [...new Set(
+      rawIds
+        .map((agentId) => typeof agentId === 'string' ? agentId.trim() : '')
+        .filter(Boolean)
+    )];
+  }
+
+  /**
+   * 校验并解析频道人数上限。
+   * @param {unknown} maxMembers
+   * @returns {number|null}
+   */
+  function resolveMaxMembers(maxMembers) {
+    if (maxMembers === undefined || maxMembers === null || maxMembers === '') return 100;
+
+    const parsed = Number.parseInt(String(maxMembers), 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) return null;
+    return parsed;
+  }
+
+  /**
+   * 按输入顺序读取已注册 Agent，并返回缺失 ID 列表。
+   * @param {string[]} agentIds
+   * @returns {{ agents: Array<{ id: string, name: string, status: string }>, missingIds: string[] }}
+   */
+  function resolveRegisteredAgents(agentIds) {
+    if (agentIds.length === 0) {
+      return { agents: [], missingIds: [] };
+    }
+
+    const sql = `SELECT id, name, status FROM agents WHERE id IN (${agentIds.map((agentId) => db.esc(agentId)).join(', ')})`;
+    const rows = db.all(sql);
+    const rowMap = new Map(rows.map((row) => [row.id, row]));
+    const agents = agentIds.map((agentId) => rowMap.get(agentId)).filter(Boolean);
+    const missingIds = agentIds.filter((agentId) => !rowMap.has(agentId));
+
+    return { agents, missingIds };
+  }
+
+  /**
+   * 将 Agent 加入频道，并广播成员加入事件。
+   * @param {object} options
+   * @param {string} options.channelId
+   * @param {Array<{ id: string, name: string }>} options.agents
+   * @param {string} options.invitedBy
+   * @returns {Array<{ id: string, name: string }>}
+   */
+  function addAgentsToChannel({ channelId, agents, invitedBy }) {
+    if (agents.length === 0) return [];
+
+    const now = new Date().toISOString();
+    for (const agent of agents) {
+      db.exec(`INSERT INTO channel_members (channel_id, agent_id, role, joined_at)
+        VALUES (${db.esc(channelId)}, ${db.esc(agent.id)}, 'member', ${db.esc(now)})`);
+
+      ws.broadcastChannel(channelId, {
+        type: 'member.joined',
+        payload: { channelId, agentId: agent.id, agentName: agent.name, invitedBy },
+        timestamp: now,
+        channelId,
+      });
+    }
+
+    return agents.map((agent) => ({ id: agent.id, name: agent.name }));
+  }
+
+  /**
+   * 彻底删除频道及其关联数据。
+   * @param {string} channelId
+   */
+  function deleteChannelCascade(channelId) {
+    db.exec(`
+      DELETE FROM messages WHERE channel_id = ${db.esc(channelId)};
+      DELETE FROM channel_members WHERE channel_id = ${db.esc(channelId)};
+      DELETE FROM subscriptions WHERE channel_id = ${db.esc(channelId)};
+      DELETE FROM channels WHERE id = ${db.esc(channelId)};
+    `);
+  }
 
   /** POST /api/v1/admin/login - 管理员登录 */
   addRoute('POST', '/api/v1/admin/login', (req, res) => {
@@ -121,6 +213,55 @@ export function registerAdminRoutes(context) {
     sendJson(res, 200, db.all(sql));
   });
 
+  /** POST /api/v1/admin/channels - 管理员创建频道并可直接邀请已注册 Agent */
+  addRoute('POST', '/api/v1/admin/channels', authAdmin, (req, res) => {
+    const { name, description, type } = req.body || {};
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+    const resolvedType = type || 'public';
+    const maxMembers = resolveMaxMembers(req.body?.maxMembers);
+    const inviteAgentIds = resolveInviteAgentIds(req.body);
+
+    if (!trimmedName) {
+      return sendJson(res, 400, { error: 'name is required' });
+    }
+    if (!VALID_CHANNEL_TYPES.has(resolvedType)) {
+      return sendJson(res, 400, { error: 'Invalid channel type' });
+    }
+    if (maxMembers === null) {
+      return sendJson(res, 400, { error: 'maxMembers must be a positive integer' });
+    }
+    if (inviteAgentIds.length > maxMembers) {
+      return sendJson(res, 409, { error: 'Invited agents exceed maxMembers' });
+    }
+
+    const { agents, missingIds } = resolveRegisteredAgents(inviteAgentIds);
+    if (missingIds.length > 0) {
+      return sendJson(res, 404, { error: 'Some target agents were not found', missingAgentIds: missingIds });
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    db.exec(`INSERT INTO channels (id, name, description, type, created_by, max_members, created_at, updated_at)
+      VALUES (${db.esc(id)}, ${db.esc(trimmedName)}, ${db.esc(description || null)}, ${db.esc(resolvedType)}, ${db.esc(`admin:${req.admin.id}`)}, ${db.esc(maxMembers)}, ${db.esc(now)}, ${db.esc(now)})`);
+
+    const invitedAgents = addAgentsToChannel({
+      channelId: id,
+      agents,
+      invitedBy: `admin:${req.admin.username}`,
+    });
+
+    const createdChannel = db.get(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
+      FROM channels c WHERE c.id = ${db.esc(id)}`);
+
+    ws.broadcastAll({
+      type: 'channel.created',
+      payload: { channel: createdChannel, creator: { id: `admin:${req.admin.id}`, name: `[Admin] ${req.admin.username}` } },
+      timestamp: now,
+    });
+
+    sendJson(res, 201, { channel: createdChannel, invitedAgents });
+  });
+
   /** GET /api/v1/admin/channels/:id - 管理员查看频道详情（成员含在线状态） */
   addRoute('GET', '/api/v1/admin/channels/:id', authAdmin, (req, res) => {
     const channel = db.get(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
@@ -138,6 +279,50 @@ export function registerAdminRoutes(context) {
     }));
 
     sendJson(res, 200, { ...channel, members: membersWithOnline });
+  });
+
+  /** POST /api/v1/admin/channels/:id/invite - 管理员邀请已注册 Agent 进入频道 */
+  addRoute('POST', '/api/v1/admin/channels/:id/invite', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT * FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+    if (channel.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
+
+    const inviteAgentIds = resolveInviteAgentIds(req.body);
+    if (inviteAgentIds.length === 0) {
+      return sendJson(res, 400, { error: 'agentId or agentIds is required' });
+    }
+
+    const { agents, missingIds } = resolveRegisteredAgents(inviteAgentIds);
+    if (missingIds.length > 0) {
+      return sendJson(res, 404, { error: 'Some target agents were not found', missingAgentIds: missingIds });
+    }
+
+    const existingMembers = db.all(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)}
+        AND agent_id IN (${inviteAgentIds.map((agentId) => db.esc(agentId)).join(', ')})`);
+    const existingMemberIds = new Set(existingMembers.map((member) => member.agent_id));
+    const newAgents = agents.filter((agent) => !existingMemberIds.has(agent.id));
+
+    if (newAgents.length === 0) {
+      return sendJson(res, 409, { error: 'All target agents are already members' });
+    }
+
+    const count = db.get(`SELECT COUNT(*) AS cnt FROM channel_members WHERE channel_id = ${db.esc(req.params.id)}`);
+    if (count && (count.cnt + newAgents.length) > channel.max_members) {
+      return sendJson(res, 409, { error: 'Inviting these agents would exceed maxMembers' });
+    }
+
+    const invitedAgents = addAgentsToChannel({
+      channelId: req.params.id,
+      agents: newAgents,
+      invitedBy: `admin:${req.admin.username}`,
+    });
+
+    sendJson(res, 200, {
+      invitedAgents,
+      invitedCount: invitedAgents.length,
+      skippedAgentIds: inviteAgentIds.filter((agentId) => existingMemberIds.has(agentId)),
+    });
   });
 
   /** GET /api/v1/admin/channels/:id/messages - 管理员查看频道消息（无需是成员） */
@@ -185,12 +370,23 @@ export function registerAdminRoutes(context) {
     sendJson(res, 201, { ...message, sender_name: senderName });
   });
 
-  /** DELETE /api/v1/admin/channels/:id - 管理员归档/删除频道 */
+  /** DELETE /api/v1/admin/channels/:id - 管理员彻底删除频道 */
   addRoute('DELETE', '/api/v1/admin/channels/:id', authAdmin, (req, res) => {
-    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    const channel = db.get(`SELECT id, name FROM channels WHERE id = ${db.esc(req.params.id)}`);
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
-    db.exec(`UPDATE channels SET is_archived = 1, updated_at = ${db.esc(new Date().toISOString())} WHERE id = ${db.esc(req.params.id)}`);
+    deleteChannelCascade(req.params.id);
+    ws.broadcastAll({
+      type: 'channel.deleted',
+      payload: {
+        channelId: req.params.id,
+        channelName: channel.name,
+        deletedBy: `admin:${req.admin.username}`,
+      },
+      timestamp: new Date().toISOString(),
+      channelId: req.params.id,
+    });
+
     res.writeHead(204).end();
   });
 

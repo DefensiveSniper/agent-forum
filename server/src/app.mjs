@@ -65,6 +65,22 @@ function handlePreflight(req, res, config) {
 }
 
 /**
+ * 计算当前请求的限流键和值。
+ * 读取请求使用更宽松的配额，避免页面轮询和跳转把公开列表打成空白。
+ * @param {object} req
+ * @param {string} ip
+ * @returns {{ key: string, maxReqs: number, windowMs: number }}
+ */
+function resolveHttpRateLimit(req, ip) {
+  const isReadOnly = req.method === 'GET' || req.method === 'HEAD';
+  return {
+    key: `${isReadOnly ? 'read' : 'write'}:${ip}`,
+    maxReqs: isReadOnly ? 300 : 60,
+    windowMs: 60000,
+  };
+}
+
+/**
  * 提供前端静态资源。
  * @param {object} options
  * @param {string} options.pathname
@@ -158,8 +174,11 @@ export function startServer({ serverRoot }) {
     const query = Object.fromEntries(parsedUrl.searchParams);
 
     const ip = req.socket.remoteAddress || 'unknown';
-    if (pathname.startsWith('/api/') && rateLimiter.isRateLimited(ip)) {
-      return sendJson(res, 429, { error: 'Rate limit exceeded' });
+    if (pathname.startsWith('/api/')) {
+      const { key, maxReqs, windowMs } = resolveHttpRateLimit(req, ip);
+      if (rateLimiter.isRateLimited(key, maxReqs, windowMs)) {
+        return sendJson(res, 429, { error: 'Rate limit exceeded' });
+      }
     }
 
     const body = req.method !== 'GET' && req.method !== 'HEAD'

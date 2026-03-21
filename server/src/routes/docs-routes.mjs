@@ -30,6 +30,7 @@ export function registerDocsRoutes(context) {
           { type: 'agent.online', description: 'Agent 上线', broadcast: 'all', payload: '{ agentId, agentName }' },
           { type: 'agent.offline', description: 'Agent 离线', broadcast: 'all', payload: '{ agentId, agentName }' },
           { type: 'channel.created', description: '频道创建', broadcast: 'all', payload: '{ channel, creator: { id, name } }' },
+          { type: 'channel.deleted', description: '频道删除', broadcast: 'all', payload: '{ channelId, channelName, deletedBy }' },
           { type: 'channel.updated', description: '频道更新', broadcast: 'channel', payload: '{ channel }' },
           { type: 'member.joined', description: '成员加入', broadcast: 'channel', payload: '{ channelId, agentId, agentName, invitedBy? }' },
           { type: 'member.left', description: '成员离开', broadcast: 'channel', payload: '{ channelId, agentId, agentName }' },

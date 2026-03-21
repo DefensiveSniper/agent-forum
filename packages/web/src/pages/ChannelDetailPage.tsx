@@ -1,12 +1,15 @@
 /**
  * 频道详情页面
- * 管理员查看频道成员列表、消息历史，并可发送评论
+ * 未登录时公开浏览频道详情，管理员登录后可邀请 Agent、删除频道并发送评论
  */
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Hash, Send, Reply, X } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, Users, Hash, Send, Reply, X, Trash2, UserPlus } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
 import { useAuthStore } from '@/stores/auth';
+import { useAlertStore } from '@/stores/alert';
+import { useConfirmStore } from '@/stores/confirm';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import EmptyState from '@/components/EmptyState';
 import StatusBadge from '@/components/StatusBadge';
@@ -48,6 +51,19 @@ interface MessagesResponse {
   data: Message[];
   hasMore: boolean;
   cursor?: string;
+}
+
+interface AdminAgent {
+  id: string;
+  name: string;
+  description: string | null;
+  status: 'active' | 'suspended';
+}
+
+interface InviteAgentsResponse {
+  invitedAgents: Array<{ id: string; name: string }>;
+  invitedCount: number;
+  skippedAgentIds: string[];
 }
 
 /** 成员角色中文标签 */
@@ -97,9 +113,12 @@ function getAgentColor(senderId: string) {
 export default function ChannelDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { apiFetch } = useApi();
   const { isAuthenticated } = useAuthStore();
+  const { showAlert } = useAlertStore();
   const [channel, setChannel] = useState<ChannelDetail | null>(null);
+  const [allAgents, setAllAgents] = useState<AdminAgent[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | undefined>();
@@ -108,6 +127,11 @@ export default function ChannelDetailPage() {
   const [comment, setComment] = useState('');
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [showInvitePanel, setShowInvitePanel] = useState(false);
+  const [inviteSearch, setInviteSearch] = useState('');
+  const [selectedInviteAgentIds, setSelectedInviteAgentIds] = useState<string[]>([]);
+  const [inviting, setInviting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -115,18 +139,40 @@ export default function ChannelDetailPage() {
   /** 加载频道详情（含成员） */
   const loadChannel = useCallback(async () => {
     try {
-      const data = await apiFetch<ChannelDetail>(`/admin/channels/${id}`);
+      const path = isAuthenticated
+        ? `/admin/channels/${id}`
+        : `/public/channels/${id}`;
+      const data = await apiFetch<ChannelDetail>(path);
       if (data) setChannel(data);
     } catch {
       // 错误在 useApi 中处理
     }
-  }, [id]);
+  }, [apiFetch, id, isAuthenticated]);
+
+  /** 加载所有已注册 Agent，用于频道内邀请 */
+  const loadAgents = useCallback(async () => {
+    if (!isAuthenticated) {
+      setAllAgents([]);
+      return;
+    }
+
+    try {
+      const data = await apiFetch<AdminAgent[]>('/admin/agents');
+      if (data && Array.isArray(data)) {
+        setAllAgents(data);
+      }
+    } catch {
+      // 错误在 useApi 中处理
+    }
+  }, [apiFetch, isAuthenticated]);
 
   /** 加载消息（首次或加载更多） */
   const loadMessages = useCallback(async (loadCursor?: string) => {
     if (loadCursor) setLoadingMore(true);
     try {
-      let path = `/admin/channels/${id}/messages?limit=50`;
+      let path = isAuthenticated
+        ? `/admin/channels/${id}/messages?limit=50`
+        : `/public/channels/${id}/messages?limit=50`;
       if (loadCursor) path += `&cursor=${loadCursor}`;
       const res = await apiFetch<MessagesResponse>(path);
       if (res) {
@@ -146,12 +192,15 @@ export default function ChannelDetailPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [id]);
+  }, [apiFetch, id, isAuthenticated]);
 
+  /** 进入频道时加载数据，仅依赖 id 和认证状态 */
   useEffect(() => {
+    setLoading(true);
     loadChannel();
+    loadAgents();
     loadMessages();
-  }, [loadChannel, loadMessages]);
+  }, [id, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** 首次加载完成后滚动到底部 */
   useEffect(() => {
@@ -162,6 +211,8 @@ export default function ChannelDetailPage() {
 
   /** 监听 WebSocket 事件：新消息、成员变动、在线状态 */
   useWebSocket((event) => {
+    if (!isAuthenticated) return;
+
     // 新消息 → 追加到消息列表
     if (event.type === 'message.new' && event.channelId === id) {
       const payload = event.payload as { message: Message; sender: { id: string; name: string } };
@@ -210,6 +261,12 @@ export default function ChannelDetailPage() {
     if (event.type === 'member.left' && event.channelId === id) {
       loadChannel();
     }
+
+    // 频道被删除 → 返回列表页
+    if (event.type === 'channel.deleted' && event.channelId === id && !deleting) {
+      showAlert('频道已被删除', 'warning');
+      navigate('/channels');
+    }
   });
 
   /**
@@ -229,6 +286,65 @@ export default function ChannelDetailPage() {
   const handleCancelReply = () => {
     setReplyTo(null);
     setComment('');
+  };
+
+  /** 切换待邀请 Agent 的选择状态 */
+  const toggleInviteAgent = (agentId: string) => {
+    setSelectedInviteAgentIds((prev) =>
+      prev.includes(agentId)
+        ? prev.filter((id) => id !== agentId)
+        : [...prev, agentId]
+    );
+  };
+
+  /** 邀请选中的已注册 Agent 进入当前频道 */
+  const handleInviteAgents = async () => {
+    if (!id || selectedInviteAgentIds.length === 0 || inviting) return;
+
+    setInviting(true);
+    try {
+      const res = await apiFetch<InviteAgentsResponse>(`/admin/channels/${id}/invite`, {
+        method: 'POST',
+        body: JSON.stringify({ agentIds: selectedInviteAgentIds }),
+      });
+
+      showAlert(`已邀请 ${res.invitedCount} 个 Agent`, 'success');
+      setInviteSearch('');
+      setSelectedInviteAgentIds([]);
+      setShowInvitePanel(false);
+      await loadChannel();
+    } catch {
+      // 错误在 useApi 中处理
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  /** 删除当前频道及其关联成员、消息和订阅 */
+  const handleDeleteChannel = async () => {
+    if (!id || !channel || deleting) return;
+
+    const confirmed = await useConfirmStore.getState().confirm({
+      title: '删除频道',
+      message: `删除频道「${channel.name}」后，频道成员、消息历史和订阅都会被移除。该操作不可恢复。`,
+      confirmText: '删除频道',
+      cancelText: '取消',
+      danger: true,
+    });
+
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      await apiFetch(`/admin/channels/${id}`, { method: 'DELETE' });
+      await queryClient.invalidateQueries({ queryKey: ['channels'] });
+      showAlert(`频道 ${channel.name} 已删除`, 'success');
+      navigate('/channels');
+    } catch {
+      // 错误在 useApi 中处理
+    } finally {
+      setDeleting(false);
+    }
   };
 
   /** 管理员发送评论 */
@@ -272,13 +388,23 @@ export default function ChannelDetailPage() {
   }
 
   if (!channel) {
-    return <EmptyState icon="❌" title="频道不存在" message="该频道可能已被删除" />;
+    return <EmptyState icon="❌" title="频道不存在" message="该频道可能不存在，或当前不可公开访问" />;
   }
 
   // API 返回的消息是 DESC 排序，需要反转为时间正序（旧→新，从上到下）
   const sortedMessages = [...messages].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
+  const memberIds = new Set((channel.members || []).map((member) => member.agent_id));
+  const availableAgents = allAgents.filter((agent) => !memberIds.has(agent.id));
+  const filteredAvailableAgents = availableAgents.filter((agent) => {
+    const keyword = inviteSearch.trim().toLowerCase();
+    if (!keyword) return true;
+    return (
+      agent.name.toLowerCase().includes(keyword) ||
+      (agent.description || '').toLowerCase().includes(keyword)
+    );
+  });
 
   return (
     <div className="flex flex-col h-full -m-8">
@@ -300,6 +426,33 @@ export default function ChannelDetailPage() {
             <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600">
               已归档
             </span>
+          )}
+          {isAuthenticated && (
+            <div className="ml-auto flex items-center gap-2">
+              {channel.is_archived !== 1 && (
+                <button
+                  onClick={() => {
+                    setShowInvitePanel((prev) => !prev);
+                    if (showInvitePanel) {
+                      setInviteSearch('');
+                      setSelectedInviteAgentIds([]);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-primary-200 bg-primary-50 text-primary-700 text-sm font-medium hover:bg-primary-100 transition-colors"
+                >
+                  <UserPlus size={14} />
+                  邀请 Agent
+                </button>
+              )}
+              <button
+                onClick={handleDeleteChannel}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-red-200 bg-red-50 text-red-600 text-sm font-medium hover:bg-red-100 transition-colors disabled:opacity-50"
+              >
+                <Trash2 size={14} />
+                {deleting ? '删除中...' : '删除频道'}
+              </button>
+            </div>
           )}
         </div>
         {channel.description && (
@@ -446,6 +599,58 @@ export default function ChannelDetailPage() {
               成员 ({channel.members?.length || 0})
             </div>
           </div>
+          {isAuthenticated && showInvitePanel && channel.is_archived !== 1 && (
+            <div className="px-3 py-3 border-b border-gray-200 bg-white space-y-3">
+              <div className="text-xs text-gray-500">
+                从已注册 Agent 中选择并加入当前频道，已选 {selectedInviteAgentIds.length} 个。
+              </div>
+              <input
+                value={inviteSearch}
+                onChange={(e) => setInviteSearch(e.target.value)}
+                placeholder="搜索 Agent"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+              />
+              <div className="max-h-56 overflow-y-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+                {filteredAvailableAgents.length === 0 ? (
+                  <div className="px-3 py-6 text-xs text-center text-gray-400">
+                    没有可邀请的 Agent
+                  </div>
+                ) : (
+                  filteredAvailableAgents.map((agent) => (
+                    <label
+                      key={agent.id}
+                      className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedInviteAgentIds.includes(agent.id)}
+                        onChange={() => toggleInviteAgent(agent.id)}
+                        className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {agent.name}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          {agent.description || '暂无描述'}
+                        </div>
+                        <div className="text-[11px] text-gray-400 mt-1">
+                          {agent.status === 'active' ? '活跃' : '已停用'}
+                        </div>
+                      </div>
+                    </label>
+                  ))
+                )}
+              </div>
+              <button
+                onClick={handleInviteAgents}
+                disabled={selectedInviteAgentIds.length === 0 || inviting}
+                className="w-full px-3 py-2 rounded-md bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {inviting ? '邀请中...' : '邀请所选 Agent'}
+              </button>
+            </div>
+          )}
           <div className="px-2 py-2 space-y-1">
             {(channel.members || []).map((m) => {
               const mColor = getAgentColor(m.agent_id);

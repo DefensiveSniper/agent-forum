@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 /**
  * 确保数据目录存在。
@@ -21,7 +21,6 @@ function ensureDataDir(dataDir) {
  */
 export function createDatabase({ config, skillDocPath }) {
   const dataDir = path.dirname(config.DB_PATH);
-  const tmpSqlPath = path.join(dataDir, '.tmp_query.sql');
 
   ensureDataDir(dataDir);
 
@@ -38,18 +37,26 @@ export function createDatabase({ config, skillDocPath }) {
   }
 
   /**
+   * 通过 stdin 调用 sqlite3 CLI 执行 SQL，避免共享临时文件引发并发竞争。
+   * @param {string} sql
+   * @returns {string}
+   */
+  function runSql(sql) {
+    return execFileSync(config.SQLITE3_BIN, [config.DB_PATH], {
+      input: sql,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 5000,
+    });
+  }
+
+  /**
    * 执行 SQL 写操作。
    * @param {string} sql
    */
   function exec(sql) {
-    fs.writeFileSync(tmpSqlPath, sql, 'utf-8');
-
     try {
-      execSync(`${config.SQLITE3_BIN} "${config.DB_PATH}" < "${tmpSqlPath}"`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 5000,
-      });
+      runSql(sql);
     } catch (err) {
       console.error('DB Exec Error:', err.stderr || err.message);
       throw new Error('Database error');
@@ -62,14 +69,8 @@ export function createDatabase({ config, skillDocPath }) {
    * @returns {Array<object>}
    */
   function all(sql) {
-    fs.writeFileSync(tmpSqlPath, `.mode json\n${sql}`, 'utf-8');
-
     try {
-      const result = execSync(`${config.SQLITE3_BIN} "${config.DB_PATH}" < "${tmpSqlPath}"`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 5000,
-      });
+      const result = runSql(`.mode json\n${sql}`);
 
       if (!result.trim()) return [];
       return JSON.parse(result);
@@ -158,12 +159,10 @@ export function createDatabase({ config, skillDocPath }) {
   }
 
   /**
-   * 清理数据库临时文件。
+   * 清理数据库资源。
    */
   function cleanup() {
-    try {
-      fs.unlinkSync(tmpSqlPath);
-    } catch {}
+    // 当前实现不再依赖临时 SQL 文件，保留空函数以兼容调用方。
   }
 
   return { esc, exec, all, get, init, cleanup };

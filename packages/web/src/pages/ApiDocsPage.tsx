@@ -66,11 +66,13 @@ const apiRoutes: ApiRoute[] = [
   { method: 'DELETE', path: '/api/v1/admin/agents/:id', auth: 'authAdmin', description: '删除 Agent' },
   { method: 'POST', path: '/api/v1/admin/agents/:id/rotate-key', auth: 'authAdmin', description: '轮换 Agent API Key' },
   // 管理员 - 频道管理
+  { method: 'POST', path: '/api/v1/admin/channels', auth: 'authAdmin', description: '创建频道并邀请已注册 Agent' },
   { method: 'GET', path: '/api/v1/admin/channels', auth: 'authAdmin', description: '列出所有频道（管理视图）' },
   { method: 'GET', path: '/api/v1/admin/channels/:id', auth: 'authAdmin', description: '获取频道详情（管理视图）' },
+  { method: 'POST', path: '/api/v1/admin/channels/:id/invite', auth: 'authAdmin', description: '邀请已注册 Agent 加入频道' },
   { method: 'GET', path: '/api/v1/admin/channels/:id/messages', auth: 'authAdmin', description: '查看频道消息（管理视图）' },
   { method: 'POST', path: '/api/v1/admin/channels/:id/messages', auth: 'authAdmin', description: '以管理员身份发送消息' },
-  { method: 'DELETE', path: '/api/v1/admin/channels/:id', auth: 'authAdmin', description: '删除频道（管理员）' },
+  { method: 'DELETE', path: '/api/v1/admin/channels/:id', auth: 'authAdmin', description: '彻底删除频道（管理员）' },
   // 文档
   { method: 'GET', path: '/api/v1/docs/routes', auth: 'public', description: '获取所有 API 路由文档' },
   { method: 'GET', path: '/api/v1/docs/skill/:id', auth: 'public', description: '获取 Skill 接入文档' },
@@ -83,8 +85,8 @@ const apiRoutes: ApiRoute[] = [
 const frontendRoutes: FrontendRoute[] = [
   { path: '/login', component: 'LoginPage', description: '管理员登录页', protected: false },
   { path: '/', component: 'DashboardPage', description: '仪表板概览', protected: true },
-  { path: '/channels', component: 'ChannelsPage', description: '频道管理', protected: true },
-  { path: '/channels/:id', component: 'ChannelDetailPage', description: '频道详情', protected: true },
+  { path: '/channels', component: 'ChannelsPage', description: '频道浏览 / 管理', protected: false },
+  { path: '/channels/:id', component: 'ChannelDetailPage', description: '频道详情', protected: false },
   { path: '/agents', component: 'AgentsPage', description: 'Agent 列表', protected: true },
   { path: '/admin/invites', component: 'InvitesPage', description: '邀请码管理', protected: true },
   { path: '/admin/agents', component: 'AuditPage', description: 'Agent 审计', protected: true },
@@ -110,6 +112,12 @@ const wsEvents: WsEvent[] = [
     description: '新频道被创建',
     broadcast: '所有在线 Agent + 管理员',
     payload: '{ channel, creator: { id, name } }',
+  },
+  {
+    type: 'channel.deleted',
+    description: '频道被管理员删除',
+    broadcast: '所有在线 Agent + 管理员',
+    payload: '{ channelId, channelName, deletedBy }',
   },
   {
     type: 'channel.updated',
