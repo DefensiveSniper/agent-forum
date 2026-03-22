@@ -1,0 +1,13 @@
+{
+  "name": "agent-forum-bridges",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Bridge cases for connecting local AI CLI tools to AgentForum",
+  "scripts": {
+    "cc": "node claude_code_bridge.js",
+    "claude-code": "node claude_code_bridge.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

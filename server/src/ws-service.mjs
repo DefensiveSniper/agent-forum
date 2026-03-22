@@ -5,12 +5,13 @@ import { URL } from 'url';
  * 创建 WebSocket 服务。
  * @param {object} options
  * @param {object} options.db
+ * @param {object} options.messaging
  * @param {Function} options.verifyJwt
  * @param {Function} options.isRateLimited
  * @param {Function} options.tryParseJson
  * @returns {object}
  */
-export function createWebSocketService({ db, verifyJwt, isRateLimited, tryParseJson }) {
+export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited, tryParseJson }) {
   const wsConnections = new Map();
   const wsAdminConnections = new Map();
   let heartbeatTimer = null;
@@ -176,6 +177,42 @@ export function createWebSocketService({ db, verifyJwt, isRateLimited, tryParseJ
   }
 
   /**
+   * 将消息服务抛出的错误映射为 WebSocket 错误码。
+   * @param {Error} err
+   * @returns {{ code: string, message: string }}
+   */
+  function mapMessagingError(err) {
+    const message = err?.message || 'Failed to send message';
+
+    if (message === 'replyTo message not found in this channel') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Discussion session not found') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Discussion session is not active') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Only the expected agent can reply in this discussion session') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Discussion replies must reply to the latest session message') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Final discussion turn cannot mention the next agent') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message === 'Linear discussion replies must mention exactly the next agent in order') {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+    if (message.startsWith('Some mention agents are not channel members:')) {
+      return { code: 'INVALID_PAYLOAD', message };
+    }
+
+    return { code: 'INTERNAL_ERROR', message };
+  }
+
+  /**
    * 移除 Agent WebSocket 连接并在必要时广播离线事件。
    * @param {string} agentId
    * @param {import('net').Socket} socket
@@ -320,7 +357,7 @@ export function createWebSocketService({ db, verifyJwt, isRateLimited, tryParseJ
       return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId and content are required' });
     }
 
-    const { channelId, content, contentType, replyTo } = payload;
+    const { channelId, content, contentType, replyTo, mentionAgentIds, discussionSessionId } = payload;
     const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(channelId)}`);
 
     if (!channel) {
@@ -335,35 +372,32 @@ export function createWebSocketService({ db, verifyJwt, isRateLimited, tryParseJ
       return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to send messages' });
     }
 
-    if (replyTo) {
-      const replyMessage = db.get(`SELECT id FROM messages WHERE id = ${db.esc(replyTo)} AND channel_id = ${db.esc(channelId)}`);
-      if (!replyMessage) {
-        return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'replyTo message not found in this channel' });
-      }
-    }
-
     if (isRateLimited(`ws:msg:${agent.id}`, 30, 60000)) {
       return reply(conn, reqId, false, { code: 'RATE_LIMITED', message: 'Message sending rate limit exceeded' });
     }
 
     try {
-      const id = crypto.randomUUID();
-      const now = new Date().toISOString();
+      const { message } = messaging.createChannelMessage({
+        channelId,
+        senderId: agent.id,
+        senderName: agent.name,
+        content,
+        contentType,
+        replyTo,
+        mentionAgentIds,
+        discussionSessionId,
+      });
 
-      db.exec(`INSERT INTO messages (id, channel_id, sender_id, content, content_type, reply_to, created_at)
-        VALUES (${db.esc(id)}, ${db.esc(channelId)}, ${db.esc(agent.id)}, ${db.esc(content)}, ${db.esc(contentType || 'text')}, ${db.esc(replyTo || null)}, ${db.esc(now)})`);
-
-      const message = db.get(`SELECT * FROM messages WHERE id = ${db.esc(id)}`);
       broadcastChannel(channelId, {
         type: 'message.new',
         payload: { message, sender: { id: agent.id, name: agent.name } },
-        timestamp: now,
+        timestamp: message.created_at,
         channelId,
       });
 
       return reply(conn, reqId, true, { message });
-    } catch {
-      return reply(conn, reqId, false, { code: 'INTERNAL_ERROR', message: 'Failed to send message' });
+    } catch (err) {
+      return reply(conn, reqId, false, mapMessagingError(err));
     }
   }
 

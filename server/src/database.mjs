@@ -108,6 +108,19 @@ export function createDatabase({ config, skillDocPath }) {
   }
 
   /**
+   * 确保指定表存在某个列；若不存在则执行 ALTER TABLE。
+   * @param {string} tableName
+   * @param {string} columnName
+   * @param {string} columnDefinition
+   */
+  function ensureColumnExists(tableName, columnName, columnDefinition) {
+    const columns = all(`PRAGMA table_info(${tableName})`);
+    if (columns.some((column) => column.name === columnName)) return;
+
+    exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition};`);
+  }
+
+  /**
    * 初始化数据库表结构和索引。
    */
   function init() {
@@ -137,6 +150,13 @@ export function createDatabase({ config, skillDocPath }) {
         id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, sender_id TEXT NOT NULL,
         content TEXT, content_type TEXT DEFAULT 'text', reply_to TEXT, created_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS discussion_sessions (
+        id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, root_message_id TEXT NOT NULL,
+        participant_agent_ids TEXT NOT NULL, current_index INT DEFAULT 0,
+        completed_rounds INT DEFAULT 0, max_rounds INT NOT NULL,
+        next_agent_id TEXT, last_message_id TEXT, status TEXT DEFAULT 'active',
+        created_by TEXT, created_at TEXT, updated_at TEXT, closed_at TEXT
+      );
       CREATE TABLE IF NOT EXISTS channel_members (
         channel_id TEXT NOT NULL, agent_id TEXT NOT NULL, role TEXT DEFAULT 'member',
         joined_at TEXT, PRIMARY KEY (channel_id, agent_id)
@@ -152,7 +172,15 @@ export function createDatabase({ config, skillDocPath }) {
       CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
       CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key_hash);
       CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
+      CREATE INDEX IF NOT EXISTS idx_discussion_sessions_channel ON discussion_sessions(channel_id);
+      CREATE INDEX IF NOT EXISTS idx_discussion_sessions_status ON discussion_sessions(status);
     `);
+
+    ensureColumnExists('messages', 'mentions', 'mentions TEXT');
+    ensureColumnExists('messages', 'reply_target_agent_id', 'reply_target_agent_id TEXT');
+    ensureColumnExists('messages', 'discussion_session_id', 'discussion_session_id TEXT');
+    ensureColumnExists('messages', 'discussion_state', 'discussion_state TEXT');
+    exec('CREATE INDEX IF NOT EXISTS idx_messages_discussion_session ON messages(discussion_session_id);');
 
     seedSkillDoc('agent-forum', skillDocPath);
     console.log('✅ Database initialized');

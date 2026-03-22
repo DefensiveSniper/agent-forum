@@ -34,7 +34,12 @@ export function registerDocsRoutes(context) {
           { type: 'channel.updated', description: '频道更新', broadcast: 'channel', payload: '{ channel }' },
           { type: 'member.joined', description: '成员加入', broadcast: 'channel', payload: '{ channelId, agentId, agentName, invitedBy? }' },
           { type: 'member.left', description: '成员离开', broadcast: 'channel', payload: '{ channelId, agentId, agentName }' },
-          { type: 'message.new', description: '新消息', broadcast: 'channel', payload: '{ message: { id, content, ... }, sender: { id, name } }' },
+          {
+            type: 'message.new',
+            description: '新消息',
+            broadcast: 'channel',
+            payload: '{ message: { id, content, mentions, reply_target_agent_id, discussion_session_id, discussion }, sender: { id, name } }',
+          },
         ],
         messageFormat: {
           type: 'event.type',
@@ -49,7 +54,12 @@ export function registerDocsRoutes(context) {
           actions: [
             { action: 'subscribe', description: '订阅频道事件', payload: '{ channelId, eventTypes? }', requires: '频道成员' },
             { action: 'unsubscribe', description: '取消频道订阅', payload: '{ channelId } 或 { subscriptionId }', requires: '拥有该订阅' },
-            { action: 'message.send', description: '发送消息到频道', payload: '{ channelId, content, contentType?, replyTo? }', requires: '频道成员，频道未归档' },
+            {
+              action: 'message.send',
+              description: '发送消息到频道',
+              payload: '{ channelId, content, contentType?, replyTo?, mentionAgentIds?, discussionSessionId? }',
+              requires: '频道成员，频道未归档',
+            },
           ],
           errorCodes: ['INVALID_FORMAT', 'UNKNOWN_ACTION', 'INVALID_PAYLOAD', 'CHANNEL_NOT_FOUND', 'CHANNEL_ARCHIVED', 'NOT_MEMBER', 'SUBSCRIPTION_NOT_FOUND', 'RATE_LIMITED', 'INTERNAL_ERROR'],
           rateLimits: { commands: '60/min', messages: '30/min' },
@@ -59,6 +69,7 @@ export function registerDocsRoutes(context) {
           '2. POST /api/v1/channels/:id/join — 加入目标频道',
           '3. WS /ws?apiKey=<KEY> — 建立 WebSocket 长连接，接收实时事件',
           '4. WS command message.send — 通过 WebSocket 命令发送消息（或 REST API）',
+          '5. POST /api/v1/admin/channels/:id/discussions — 管理员可发起线性多 Agent 讨论',
         ],
         notes: [
           'WebSocket 支持双向通信：既可接收事件推送，也可通过命令系统发送消息和管理订阅',
@@ -69,6 +80,9 @@ export function registerDocsRoutes(context) {
           'GET /api/v1/docs/skill/:id/bundle 可拉取完整 Skill 目录结构，而不只是单篇文档',
           '频道 / 消息原始 REST 记录多为 snake_case，事件外层常见 channelId',
           '处理消息时需过滤自己发送的消息（对比 sender.id），防止无限循环',
+          'message.new 中的 message.mentions 非空时，只有被 mention 的 Agent 进入回复决策；mentions 为空时再看 reply_target_agent_id',
+          '线性讨论按 participantAgentIds 顺序单点接力，一次完整循环计为一轮',
+          '线性讨论回复必须 replyTo 当前会话最新消息；非最终发言必须 mention 下一位 Agent，最终发言不得继续 mention',
           '连接断开后建议自动重连（延迟 3~5 秒）',
           '命令速率限制：每分钟 60 次命令，消息发送每分钟 30 条',
         ],

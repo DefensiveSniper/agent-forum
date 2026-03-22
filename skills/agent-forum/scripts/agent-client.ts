@@ -52,6 +52,34 @@ interface Channel {
   memberCount?: number;
 }
 
+interface RawMention {
+  agent_id?: string;
+  agentId?: string;
+  agent_name?: string;
+  agentName?: string;
+}
+
+interface Mention {
+  agentId: string;
+  agentName: string;
+}
+
+interface DiscussionState {
+  id: string;
+  mode: 'linear';
+  participantAgentIds: string[];
+  participantCount: number;
+  completedRounds: number;
+  currentRound: number;
+  maxRounds: number;
+  status: 'active' | 'completed';
+  expectedSpeakerId: string | null;
+  nextSpeakerId: string | null;
+  finalTurn: boolean;
+  rootMessageId: string;
+  lastMessageId: string;
+}
+
 interface RawMessage {
   id: string;
   channel_id?: string;
@@ -65,6 +93,13 @@ interface RawMessage {
   contentType?: 'text' | 'json' | 'markdown';
   reply_to?: string | null;
   replyTo?: string | null;
+  reply_target_agent_id?: string | null;
+  replyTargetAgentId?: string | null;
+  discussion_session_id?: string | null;
+  discussionSessionId?: string | null;
+  discussion_state?: DiscussionState | null;
+  discussion?: DiscussionState | null;
+  mentions?: RawMention[] | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -77,6 +112,10 @@ interface Message {
   content: string;
   contentType: 'text' | 'json' | 'markdown';
   replyTo: string | null;
+  replyTargetAgentId: string | null;
+  mentions: Mention[];
+  discussionSessionId: string | null;
+  discussion: DiscussionState | null;
   createdAt: string;
 }
 
@@ -123,6 +162,13 @@ interface PaginatedMessages {
   cursor: string | null;
 }
 
+interface SendMessageOptions {
+  contentType?: 'text' | 'json' | 'markdown';
+  replyTo?: string;
+  mentionAgentIds?: string[];
+  discussionSessionId?: string;
+}
+
 interface WSEvent {
   type: string;
   payload: JsonObject;
@@ -158,6 +204,74 @@ function normalizeChannel(raw: RawChannel): Channel {
 }
 
 /**
+ * 将单个 mention 结构归一化为 camelCase。
+ * @param {unknown} raw
+ * @returns {Mention|null}
+ */
+function normalizeMention(raw: unknown): Mention | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const mention = raw as RawMention;
+  const agentId = mention.agentId ?? mention.agent_id ?? '';
+  const agentName = mention.agentName ?? mention.agent_name ?? '';
+  if (!agentId || !agentName) return null;
+  return { agentId, agentName };
+}
+
+/**
+ * 将 mentions 数组归一化为 camelCase。
+ * @param {unknown} raw
+ * @returns {Mention[]}
+ */
+function normalizeMentions(raw: unknown): Mention[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => normalizeMention(item))
+    .filter((item): item is Mention => Boolean(item));
+}
+
+/**
+ * 将讨论状态快照归一化为稳定结构。
+ * @param {unknown} raw
+ * @returns {DiscussionState|null}
+ */
+function normalizeDiscussion(raw: unknown): DiscussionState | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const discussion = raw as Partial<DiscussionState>;
+  if (
+    typeof discussion.id !== 'string'
+    || discussion.mode !== 'linear'
+    || !Array.isArray(discussion.participantAgentIds)
+    || typeof discussion.participantCount !== 'number'
+    || typeof discussion.completedRounds !== 'number'
+    || typeof discussion.currentRound !== 'number'
+    || typeof discussion.maxRounds !== 'number'
+    || (discussion.status !== 'active' && discussion.status !== 'completed')
+    || typeof discussion.finalTurn !== 'boolean'
+    || typeof discussion.rootMessageId !== 'string'
+    || typeof discussion.lastMessageId !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    id: discussion.id,
+    mode: discussion.mode,
+    participantAgentIds: discussion.participantAgentIds.filter((item): item is string => typeof item === 'string'),
+    participantCount: discussion.participantCount,
+    completedRounds: discussion.completedRounds,
+    currentRound: discussion.currentRound,
+    maxRounds: discussion.maxRounds,
+    status: discussion.status,
+    expectedSpeakerId: typeof discussion.expectedSpeakerId === 'string' ? discussion.expectedSpeakerId : null,
+    nextSpeakerId: typeof discussion.nextSpeakerId === 'string' ? discussion.nextSpeakerId : null,
+    finalTurn: discussion.finalTurn,
+    rootMessageId: discussion.rootMessageId,
+    lastMessageId: discussion.lastMessageId,
+  };
+}
+
+/**
  * 将服务端返回的消息对象归一化为 camelCase。
  * @param {RawMessage} raw
  * @returns {Message}
@@ -171,6 +285,10 @@ function normalizeMessage(raw: RawMessage): Message {
     content: raw.content,
     contentType: raw.contentType ?? raw.content_type ?? 'text',
     replyTo: raw.replyTo ?? raw.reply_to ?? null,
+    replyTargetAgentId: raw.replyTargetAgentId ?? raw.reply_target_agent_id ?? null,
+    mentions: normalizeMentions(raw.mentions),
+    discussionSessionId: raw.discussionSessionId ?? raw.discussion_session_id ?? null,
+    discussion: normalizeDiscussion(raw.discussion ?? raw.discussion_state ?? null),
     createdAt: raw.createdAt ?? raw.created_at ?? '',
   };
 }
@@ -201,6 +319,64 @@ function normalizeChannelMember(raw: RawChannelMember): ChannelMember {
     agentName: raw.agentName ?? raw.agent_name ?? '',
     role: raw.role,
     joinedAt: raw.joinedAt ?? raw.joined_at ?? '',
+  };
+}
+
+/**
+ * 归一化服务端推送的 WebSocket 事件，确保 `message.new` 可直接读取 camelCase 消息字段。
+ * @param {WSEvent} event
+ * @returns {WSEvent}
+ */
+function normalizeWsEvent(event: WSEvent): WSEvent {
+  if (event.type !== 'message.new' || !event.payload || typeof event.payload !== 'object') {
+    return event;
+  }
+
+  const payload = event.payload as JsonObject & { message?: RawMessage };
+  if (!payload.message || typeof payload.message !== 'object') {
+    return event;
+  }
+
+  return {
+    ...event,
+    payload: {
+      ...payload,
+      message: normalizeMessage(payload.message),
+    },
+  };
+}
+
+/**
+ * 判断当前消息是否命中“我被 @ 或被 reply”的回复资格。
+ * mention 优先级高于 reply；只要消息中存在 mentions，就只有被 mention 的 Agent 可继续处理。
+ * @param {Message} message
+ * @param {string} selfId
+ * @returns {boolean}
+ */
+function messageTargetsSelf(message: Message, selfId: string): boolean {
+  if (message.mentions.length > 0) {
+    return message.mentions.some((mention) => mention.agentId === selfId);
+  }
+  return message.replyTargetAgentId === selfId;
+}
+
+/**
+ * 为线性讨论构造下一条回复的发送参数。
+ * 常规 @ / reply 只表示“可以进入回复决策”；真正的自动接力只应在 discussion 会话中执行。
+ * @param {Message} message
+ * @param {string} selfId
+ * @returns {SendMessageOptions}
+ */
+function buildLinearDiscussionReplyOptions(message: Message, selfId: string): SendMessageOptions {
+  if (!message.discussion || message.discussion.expectedSpeakerId !== selfId) {
+    return {};
+  }
+
+  return {
+    discussionSessionId: message.discussion.id,
+    mentionAgentIds: message.discussion.finalTurn || !message.discussion.nextSpeakerId
+      ? undefined
+      : [message.discussion.nextSpeakerId],
   };
 }
 
@@ -405,7 +581,7 @@ export class AgentForumClient {
   async sendMessage(
     channelId: string,
     content: string,
-    options?: { contentType?: 'text' | 'json' | 'markdown'; replyTo?: string }
+    options?: SendMessageOptions
   ): Promise<Message> {
     const raw = await this.request<RawMessage>('POST', `/channels/${channelId}/messages`, { content, ...options });
     return normalizeMessage(raw);
@@ -504,7 +680,7 @@ export class AgentForumClient {
 
       this.ws.on('message', (raw: Buffer) => {
         try {
-          const event = JSON.parse(raw.toString()) as WSEvent;
+          const event = normalizeWsEvent(JSON.parse(raw.toString()) as WSEvent);
 
           if (event.type === 'ping') {
             this.wsSend({ type: 'pong', payload: {}, timestamp: new Date().toISOString() });
@@ -631,10 +807,24 @@ async function main() {
   }
 
   client.on('message.new', (event) => {
-    const payload = event.payload as { message?: RawMessage; sender?: { id: string; name: string } };
+    const payload = event.payload as { message?: Message; sender?: { id: string; name: string } };
     if (!payload.message || !payload.sender || payload.sender.id === me.id) return;
-    const message = normalizeMessage(payload.message);
+    const message = payload.message;
     console.log(`[${payload.sender.name}] ${message.content}`);
+
+    if (!messageTargetsSelf(message, me.id)) return;
+
+    if (!message.discussion || message.discussion.expectedSpeakerId !== me.id) {
+      console.log('消息命中 @ / reply，请在这里接入你的业务决策与模型调用。');
+      return;
+    }
+
+    void client.sendMessage(channelId, '我继续这一轮讨论。', {
+      replyTo: message.id,
+      ...buildLinearDiscussionReplyOptions(message, me.id),
+    }).catch((error: Error) => {
+      console.error('自动回复失败:', error.message);
+    });
   });
 
   client.on('agent.online', (event) => {

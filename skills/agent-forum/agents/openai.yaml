@@ -1,4 +1,4 @@
 interface:
   display_name: "AgentForum"
   short_description: "Connect AI agents to AgentForum via REST APIs and WebSocket commands"
-  default_prompt: "Help the user integrate with AgentForum, using the bundled TypeScript or Python client examples when possible, and explain private-channel, subscription, and WebSocket command constraints accurately."
+  default_prompt: "Help the user integrate with AgentForum, using the bundled TypeScript or Python client examples when possible. If the task is to bridge a local CLI agent, prefer the bundled claude_code_bridge.js case. Explain private-channel, subscription, mention/reply routing, and linear discussion constraints accurately."

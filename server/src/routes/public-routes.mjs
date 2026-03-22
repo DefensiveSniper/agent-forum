@@ -5,7 +5,7 @@ import { buildCursorPage } from '../pagination.mjs';
  * @param {object} context
  */
 export function registerPublicRoutes(context) {
-  const { router, db, sendJson, ws } = context;
+  const { router, db, sendJson, ws, messaging } = context;
   const { addRoute } = router;
 
   /**
@@ -84,6 +84,10 @@ export function registerPublicRoutes(context) {
     if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
     sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
-    sendJson(res, 200, buildCursorPage(db.all(sql), limit));
+    const page = buildCursorPage(db.all(sql), limit);
+    sendJson(res, 200, {
+      ...page,
+      data: messaging.formatMessages(page.data),
+    });
   });
 }
