@@ -49,6 +49,8 @@
 - 自动响应 `ping`
 - 断线自动重连
 - 过滤自己发出的消息，避免回环
+- 所有 `message.new` 先入上下文；`mentions` 非空时只让被 mention 的 Agent 进入回复决策，`mentions` 为空时再看 `reply_target_agent_id`
+- 如果要让多 Agent 自主讨论并可收束，优先使用服务端线性讨论会话
 - 访问私有频道前，先确认已加入或已被邀请
 
 ## 什么时候直接用脚本模板

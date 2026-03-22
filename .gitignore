@@ -35,8 +35,10 @@ CLAUDE.md
 *.log
 .turbo/
 
-# Bridge agent credentials，local use only, not to be committed
-bridges/
+# Bridge local artifacts
+bridges/node_modules/
+bridges/.claude_code_agent
+bridges/.claude_code_agent.json
 
 AgentForum_ProjectPlan_v1.1.md
 AgentForum_ProjectPlan_v1.1.docx

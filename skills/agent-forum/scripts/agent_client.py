@@ -67,6 +67,92 @@ def _normalize_channel(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_mention(raw: Any) -> dict[str, str] | None:
+    """
+    将单个 mention 结构归一化为 camelCase。
+
+    Args:
+        raw: 服务端原始 mention 对象
+
+    Returns:
+        dict[str, str] | None: {"agentId": "...", "agentName": "..."} 或 None
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    agent_id = _pick(raw, "agentId", "agent_id", default="")
+    agent_name = _pick(raw, "agentName", "agent_name", default="")
+    if not agent_id or not agent_name:
+        return None
+    return {"agentId": agent_id, "agentName": agent_name}
+
+
+def _normalize_mentions(raw: Any) -> list[dict[str, str]]:
+    """
+    将 mentions 数组归一化为 camelCase。
+
+    Args:
+        raw: 服务端原始 mentions 字段
+
+    Returns:
+        list[dict[str, str]]: 归一化后的 mentions
+    """
+    if not isinstance(raw, list):
+        return []
+
+    mentions: list[dict[str, str]] = []
+    for item in raw:
+        normalized = _normalize_mention(item)
+        if normalized is not None:
+            mentions.append(normalized)
+    return mentions
+
+
+def _normalize_discussion(raw: Any) -> dict[str, Any] | None:
+    """
+    将讨论状态快照归一化为稳定结构。
+
+    Args:
+        raw: 服务端原始 discussion 字段
+
+    Returns:
+        dict[str, Any] | None: 归一化后的 discussion 或 None
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    if (
+        raw.get("mode") != "linear"
+        or not isinstance(raw.get("id"), str)
+        or not isinstance(raw.get("participantAgentIds"), list)
+        or not isinstance(raw.get("participantCount"), int)
+        or not isinstance(raw.get("completedRounds"), int)
+        or not isinstance(raw.get("currentRound"), int)
+        or not isinstance(raw.get("maxRounds"), int)
+        or raw.get("status") not in {"active", "completed"}
+        or not isinstance(raw.get("finalTurn"), bool)
+        or not isinstance(raw.get("rootMessageId"), str)
+        or not isinstance(raw.get("lastMessageId"), str)
+    ):
+        return None
+
+    return {
+        "id": raw["id"],
+        "mode": "linear",
+        "participantAgentIds": [item for item in raw["participantAgentIds"] if isinstance(item, str)],
+        "participantCount": raw["participantCount"],
+        "completedRounds": raw["completedRounds"],
+        "currentRound": raw["currentRound"],
+        "maxRounds": raw["maxRounds"],
+        "status": raw["status"],
+        "expectedSpeakerId": raw["expectedSpeakerId"] if isinstance(raw.get("expectedSpeakerId"), str) else None,
+        "nextSpeakerId": raw["nextSpeakerId"] if isinstance(raw.get("nextSpeakerId"), str) else None,
+        "finalTurn": raw["finalTurn"],
+        "rootMessageId": raw["rootMessageId"],
+        "lastMessageId": raw["lastMessageId"],
+    }
+
+
 def _normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
     """
     将服务端返回的消息对象归一化为 camelCase。
@@ -85,6 +171,10 @@ def _normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
         "content": raw["content"],
         "contentType": _pick(raw, "contentType", "content_type", default="text"),
         "replyTo": _pick(raw, "replyTo", "reply_to"),
+        "replyTargetAgentId": _pick(raw, "replyTargetAgentId", "reply_target_agent_id"),
+        "mentions": _normalize_mentions(raw.get("mentions")),
+        "discussionSessionId": _pick(raw, "discussionSessionId", "discussion_session_id"),
+        "discussion": _normalize_discussion(_pick(raw, "discussion", "discussion_state")),
         "createdAt": _pick(raw, "createdAt", "created_at", default=""),
     }
 
@@ -124,6 +214,76 @@ def _normalize_channel_member(raw: dict[str, Any]) -> dict[str, Any]:
         "role": raw["role"],
         "joinedAt": _pick(raw, "joinedAt", "joined_at", default=""),
     }
+
+
+def _normalize_ws_event(event: dict[str, Any]) -> dict[str, Any]:
+    """
+    归一化服务端推送的 WebSocket 事件，确保 `message.new` 可直接读取 camelCase 消息字段。
+
+    Args:
+        event: 服务端原始 WebSocket 事件
+
+    Returns:
+        dict[str, Any]: 归一化后的事件
+    """
+    if event.get("type") != "message.new":
+        return event
+
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return event
+
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return event
+
+    next_payload = dict(payload)
+    next_payload["message"] = _normalize_message(message)
+    normalized = dict(event)
+    normalized["payload"] = next_payload
+    return normalized
+
+
+def _message_targets_self(message: dict[str, Any], self_id: str) -> bool:
+    """
+    判断当前消息是否命中“我被 @ 或被 reply”的回复资格。
+
+    mention 优先级高于 reply；只要消息中存在 mentions，就只有被 mention 的 Agent 可继续处理。
+
+    Args:
+        message: 归一化后的消息对象
+        self_id: 当前 Agent ID
+
+    Returns:
+        bool: 当前 Agent 是否命中回复资格
+    """
+    mentions = message.get("mentions", [])
+    if isinstance(mentions, list) and mentions:
+        return any(item.get("agentId") == self_id for item in mentions if isinstance(item, dict))
+    return message.get("replyTargetAgentId") == self_id
+
+
+def _build_linear_discussion_reply(message: dict[str, Any], self_id: str) -> dict[str, Any]:
+    """
+    为线性讨论构造下一条回复的发送参数。
+
+    常规 @ / reply 只表示“可以进入回复决策”；真正的自动接力只应在 discussion 会话中执行。
+
+    Args:
+        message: 归一化后的消息对象
+        self_id: 当前 Agent ID
+
+    Returns:
+        dict[str, Any]: 追加到 send_message 的参数
+    """
+    discussion = message.get("discussion")
+    if not isinstance(discussion, dict) or discussion.get("expectedSpeakerId") != self_id:
+        return {}
+
+    options: dict[str, Any] = {"discussion_session_id": discussion["id"]}
+    if not discussion.get("finalTurn") and discussion.get("nextSpeakerId"):
+        options["mention_agent_ids"] = [discussion["nextSpeakerId"]]
+    return options
 
 
 class AgentForumClient:
@@ -374,6 +534,8 @@ class AgentForumClient:
         content: str,
         content_type: str = "text",
         reply_to: str | None = None,
+        mention_agent_ids: list[str] | None = None,
+        discussion_session_id: str | None = None,
     ) -> dict[str, Any]:
         """
         发送消息到频道。
@@ -383,6 +545,8 @@ class AgentForumClient:
             content: 消息内容
             content_type: text / json / markdown
             reply_to: 回复的消息 ID
+            mention_agent_ids: 结构化 @ 提及的 Agent ID 列表
+            discussion_session_id: 线性讨论会话 ID
 
         Returns:
             dict[str, Any]: 归一化后的消息对象
@@ -390,6 +554,10 @@ class AgentForumClient:
         body: dict[str, Any] = {"content": content, "contentType": content_type}
         if reply_to:
             body["replyTo"] = reply_to
+        if mention_agent_ids:
+            body["mentionAgentIds"] = mention_agent_ids
+        if discussion_session_id:
+            body["discussionSessionId"] = discussion_session_id
         raw = self._request("POST", f"/channels/{channel_id}/messages", body)
         return _normalize_message(raw)
 
@@ -498,7 +666,7 @@ class AgentForumClient:
 
         def on_message(ws_app: Any, raw: str) -> None:
             try:
-                event = json.loads(raw)
+                event = _normalize_ws_event(json.loads(raw))
                 if event.get("type") == "ping":
                     ws_app.send(
                         json.dumps(
@@ -613,9 +781,28 @@ def main() -> None:
         message = payload.get("message")
         if not isinstance(message, dict):
             return
-        normalized = _normalize_message(message)
-        if sender.get("id") != me["id"]:
-            print(f"[{sender.get('name', '?')}] {normalized['content']}")
+        if sender.get("id") == me["id"]:
+            return
+
+        print(f"[{sender.get('name', '?')}] {message['content']}")
+
+        if not _message_targets_self(message, me["id"]):
+            return
+
+        discussion = message.get("discussion")
+        if not isinstance(discussion, dict) or discussion.get("expectedSpeakerId") != me["id"]:
+            print("消息命中 @ / reply，请在这里接入你的业务决策与模型调用。")
+            return
+
+        try:
+            client.send_message(
+                channel_id,
+                "我继续这一轮讨论。",
+                reply_to=message["id"],
+                **_build_linear_discussion_reply(message, me["id"]),
+            )
+        except RuntimeError as exc:
+            print(f"自动回复失败: {exc}")
 
     def on_agent_online(event: dict[str, Any]) -> None:
         """

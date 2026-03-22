@@ -6,7 +6,7 @@ import { buildCursorPage } from '../pagination.mjs';
  * @param {object} context
  */
 export function registerAdminRoutes(context) {
-  const { router, auth, db, sendJson, formatAgent, ws, security } = context;
+  const { router, auth, db, sendJson, formatAgent, ws, security, messaging } = context;
   const { addRoute } = router;
   const { authAdmin } = auth;
   const VALID_CHANNEL_TYPES = new Set(['public', 'private', 'broadcast']);
@@ -98,8 +98,61 @@ export function registerAdminRoutes(context) {
       DELETE FROM messages WHERE channel_id = ${db.esc(channelId)};
       DELETE FROM channel_members WHERE channel_id = ${db.esc(channelId)};
       DELETE FROM subscriptions WHERE channel_id = ${db.esc(channelId)};
+      DELETE FROM discussion_sessions WHERE channel_id = ${db.esc(channelId)};
       DELETE FROM channels WHERE id = ${db.esc(channelId)};
     `);
+  }
+
+  /**
+   * 将消息服务错误映射为 HTTP 响应。
+   * @param {import('http').ServerResponse} res
+   * @param {Error} err
+   * @returns {void}
+   */
+  function sendMessagingError(res, err) {
+    const message = err?.message || 'Failed to process message';
+
+    if (
+      message === 'replyTo message not found in this channel'
+      || message.startsWith('Some mention agents are not channel members:')
+      || message.startsWith('Some participant agents are not channel members:')
+      || message === 'Linear discussion requires at least 2 participant agents'
+      || message === 'maxRounds must be a positive integer'
+    ) {
+      sendJson(res, 400, { error: message });
+      return;
+    }
+    if (message.startsWith('Some participant agents are offline:')) {
+      sendJson(res, 409, { error: message });
+      return;
+    }
+    if (
+      message === 'Discussion session not found'
+      || message === 'Discussion session is not active'
+      || message === 'Only the expected agent can reply in this discussion session'
+      || message === 'Discussion replies must reply to the latest session message'
+      || message === 'Final discussion turn cannot mention the next agent'
+      || message === 'Linear discussion replies must mention exactly the next agent in order'
+    ) {
+      sendJson(res, 409, { error: message });
+      return;
+    }
+
+    sendJson(res, 400, { error: message });
+  }
+
+  /**
+   * 构建格式化后的消息分页结果。
+   * @param {Array<object>} rows
+   * @param {number} limit
+   * @returns {object}
+   */
+  function buildMessagePage(rows, limit) {
+    const page = buildCursorPage(rows, limit);
+    return {
+      ...page,
+      data: messaging.formatMessages(page.data),
+    };
   }
 
   /** POST /api/v1/admin/login - 管理员登录 */
@@ -339,7 +392,7 @@ export function registerAdminRoutes(context) {
     if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
     sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
-    sendJson(res, 200, buildCursorPage(db.all(sql), limit));
+    sendJson(res, 200, buildMessagePage(db.all(sql), limit));
   });
 
   /** POST /api/v1/admin/channels/:id/messages - 管理员发送评论到频道 */
@@ -348,26 +401,71 @@ export function registerAdminRoutes(context) {
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
     if (channel.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
 
-    const { content, contentType, replyTo } = req.body;
+    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId } = req.body;
     if (!content) return sendJson(res, 400, { error: 'content is required' });
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
     const senderId = `admin:${req.admin.username}`;
     const senderName = `[Admin] ${req.admin.username}`;
 
-    db.exec(`INSERT INTO messages (id, channel_id, sender_id, content, content_type, reply_to, created_at)
-      VALUES (${db.esc(id)}, ${db.esc(req.params.id)}, ${db.esc(senderId)}, ${db.esc(content)}, ${db.esc(contentType || 'text')}, ${db.esc(replyTo || null)}, ${db.esc(now)})`);
+    try {
+      const { message } = messaging.createChannelMessage({
+        channelId: req.params.id,
+        senderId,
+        senderName,
+        content,
+        contentType,
+        replyTo,
+        mentionAgentIds,
+        discussionSessionId,
+      });
 
-    const message = db.get(`SELECT * FROM messages WHERE id = ${db.esc(id)}`);
-    ws.broadcastChannel(req.params.id, {
-      type: 'message.new',
-      payload: { message, sender: { id: senderId, name: senderName } },
-      timestamp: now,
-      channelId: req.params.id,
-    });
+      ws.broadcastChannel(req.params.id, {
+        type: 'message.new',
+        payload: { message, sender: { id: senderId, name: senderName } },
+        timestamp: message.created_at,
+        channelId: req.params.id,
+      });
 
-    sendJson(res, 201, { ...message, sender_name: senderName });
+      sendJson(res, 201, message);
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/admin/channels/:id/discussions - 管理员发起线性多 Agent 讨论 */
+  addRoute('POST', '/api/v1/admin/channels/:id/discussions', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+    if (channel.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
+
+    const { content, participantAgentIds, maxRounds } = req.body || {};
+    if (!content) return sendJson(res, 400, { error: 'content is required' });
+
+    const senderId = `admin:${req.admin.username}`;
+    const senderName = `[Admin] ${req.admin.username}`;
+
+    try {
+      const { message, discussion } = messaging.createLinearDiscussionSession({
+        channelId: req.params.id,
+        senderId,
+        senderName,
+        content,
+        participantAgentIds,
+        maxRounds,
+        isAgentOnline: ws.isAgentOnline,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'message.new',
+        payload: { message, sender: { id: senderId, name: senderName } },
+        timestamp: message.created_at,
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 201, { message, discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
   });
 
   /** DELETE /api/v1/admin/channels/:id - 管理员彻底删除频道 */

@@ -10,6 +10,7 @@ import { createRouter } from './router.mjs';
 import { MIME_TYPES, createFormatAgent, createSendJson, tryParseJson } from './http-utils.mjs';
 import { createAuth } from './auth.mjs';
 import { createWebSocketService } from './ws-service.mjs';
+import { createChannelMessagingService } from './channel-messaging.mjs';
 import { registerRoutes } from './routes/index.mjs';
 import { seedAdmin } from './bootstrap-data.mjs';
 
@@ -139,8 +140,10 @@ export function startServer({ serverRoot }) {
   const rateLimiter = createRateLimiter();
   const sendJson = createSendJson(config);
   const router = createRouter();
+  const messaging = createChannelMessagingService({ db, tryParseJson });
   const ws = createWebSocketService({
     db,
+    messaging,
     verifyJwt: security.verifyJwt,
     isRateLimited: rateLimiter.isRateLimited,
     tryParseJson,
@@ -162,6 +165,7 @@ export function startServer({ serverRoot }) {
     auth,
     router,
     ws,
+    messaging,
     tryParseJson,
     skillsRoot: path.join(serverRoot, '../skills'),
   });

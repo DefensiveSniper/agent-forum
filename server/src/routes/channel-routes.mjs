@@ -6,7 +6,7 @@ import { buildCursorPage } from '../pagination.mjs';
  * @param {object} context
  */
 export function registerChannelRoutes(context) {
-  const { router, auth, db, sendJson, ws } = context;
+  const { router, auth, db, sendJson, ws, messaging } = context;
   const { addRoute } = router;
   const { authAgent } = auth;
 
@@ -27,6 +27,52 @@ export function registerChannelRoutes(context) {
 
     if (channel.type === 'private' && !member) return { channel, member: null };
     return { channel, member };
+  }
+
+  /**
+   * 将消息服务错误映射为 HTTP 响应。
+   * @param {import('http').ServerResponse} res
+   * @param {Error} err
+   * @returns {void}
+   */
+  function sendMessagingError(res, err) {
+    const message = err?.message || 'Failed to process message';
+
+    if (message === 'replyTo message not found in this channel') {
+      sendJson(res, 400, { error: message });
+      return;
+    }
+    if (message === 'Discussion session not found') {
+      sendJson(res, 404, { error: message });
+      return;
+    }
+    if (
+      message === 'Discussion session is not active'
+      || message === 'Only the expected agent can reply in this discussion session'
+      || message === 'Discussion replies must reply to the latest session message'
+      || message === 'Final discussion turn cannot mention the next agent'
+      || message === 'Linear discussion replies must mention exactly the next agent in order'
+      || message.startsWith('Some mention agents are not channel members:')
+    ) {
+      sendJson(res, 409, { error: message });
+      return;
+    }
+
+    sendJson(res, 400, { error: message });
+  }
+
+  /**
+   * 构建格式化后的游标分页消息结果。
+   * @param {Array<object>} rows
+   * @param {number} limit
+   * @returns {object}
+   */
+  function buildMessagePage(rows, limit) {
+    const page = buildCursorPage(rows, limit);
+    return {
+      ...page,
+      data: messaging.formatMessages(page.data),
+    };
   }
 
   /** POST /api/v1/channels - 创建频道 */
@@ -213,24 +259,32 @@ export function registerChannelRoutes(context) {
     const member = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
     if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
 
-    const { content, contentType, replyTo } = req.body;
+    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId } = req.body;
     if (!content) return sendJson(res, 400, { error: 'content is required' });
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    try {
+      const { message } = messaging.createChannelMessage({
+        channelId: req.params.id,
+        senderId: req.agent.id,
+        senderName: req.agent.name,
+        content,
+        contentType,
+        replyTo,
+        mentionAgentIds,
+        discussionSessionId,
+      });
 
-    db.exec(`INSERT INTO messages (id, channel_id, sender_id, content, content_type, reply_to, created_at)
-      VALUES (${db.esc(id)}, ${db.esc(req.params.id)}, ${db.esc(req.agent.id)}, ${db.esc(content)}, ${db.esc(contentType || 'text')}, ${db.esc(replyTo || null)}, ${db.esc(now)})`);
+      ws.broadcastChannel(req.params.id, {
+        type: 'message.new',
+        payload: { message, sender: { id: req.agent.id, name: req.agent.name } },
+        timestamp: message.created_at,
+        channelId: req.params.id,
+      });
 
-    const message = db.get(`SELECT * FROM messages WHERE id = ${db.esc(id)}`);
-    ws.broadcastChannel(req.params.id, {
-      type: 'message.new',
-      payload: { message, sender: { id: req.agent.id, name: req.agent.name } },
-      timestamp: now,
-      channelId: req.params.id,
-    });
-
-    sendJson(res, 201, message);
+      sendJson(res, 201, message);
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
   });
 
   /** GET /api/v1/channels/:id/messages - 获取消息历史（游标分页） */
@@ -240,11 +294,14 @@ export function registerChannelRoutes(context) {
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
-    let sql = `SELECT * FROM messages WHERE channel_id = ${db.esc(req.params.id)}`;
+    let sql = `SELECT m.*, a.name AS sender_name
+      FROM messages m
+      LEFT JOIN agents a ON a.id = m.sender_id
+      WHERE m.channel_id = ${db.esc(req.params.id)}`;
     if (cursor) sql += ` AND created_at < ${db.esc(cursor)}`;
-    sql += ` ORDER BY created_at DESC LIMIT ${limit + 1}`;
+    sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
-    sendJson(res, 200, buildCursorPage(db.all(sql), limit));
+    sendJson(res, 200, buildMessagePage(db.all(sql), limit));
   });
 
   /** GET /api/v1/channels/:id/messages/:msgId - 获取单条消息 */
@@ -257,8 +314,12 @@ export function registerChannelRoutes(context) {
         AND agent_id = ${db.esc(req.agent.id)}`);
     if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
 
-    const message = db.get(`SELECT * FROM messages WHERE id = ${db.esc(req.params.msgId)} AND channel_id = ${db.esc(req.params.id)}`);
+    const message = db.get(`SELECT m.*, a.name AS sender_name
+      FROM messages m
+      LEFT JOIN agents a ON a.id = m.sender_id
+      WHERE m.id = ${db.esc(req.params.msgId)}
+        AND m.channel_id = ${db.esc(req.params.id)}`);
     if (!message) return sendJson(res, 404, { error: 'Message not found' });
-    sendJson(res, 200, message);
+    sendJson(res, 200, messaging.formatMessage(message));
   });
 }

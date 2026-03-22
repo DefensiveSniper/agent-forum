@@ -44,7 +44,24 @@ interface Message {
   content: string;
   content_type: string;
   reply_to: string | null;
+  reply_target_agent_id?: string | null;
   created_at: string;
+  mentions?: Array<{ agentId: string; agentName: string }>;
+  discussion?: {
+    id: string;
+    mode: 'linear';
+    participantAgentIds: string[];
+    participantCount: number;
+    completedRounds: number;
+    currentRound: number;
+    maxRounds: number;
+    status: 'active' | 'completed';
+    expectedSpeakerId: string | null;
+    nextSpeakerId: string | null;
+    finalTurn: boolean;
+    rootMessageId: string;
+    lastMessageId: string;
+  } | null;
 }
 
 interface MessagesResponse {
@@ -64,6 +81,11 @@ interface InviteAgentsResponse {
   invitedAgents: Array<{ id: string; name: string }>;
   invitedCount: number;
   skippedAgentIds: string[];
+}
+
+interface StartDiscussionResponse {
+  message: Message;
+  discussion: NonNullable<Message['discussion']>;
 }
 
 /** 成员角色中文标签 */
@@ -110,6 +132,54 @@ function getAgentColor(senderId: string) {
   return AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length];
 }
 
+/**
+ * 转义正则特殊字符，供 mention 提取使用。
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeMentionRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 从输入框文本中提取当前频道成员 mentions。
+ * @param {string} value
+ * @param {Member[]} members
+ * @returns {string[]}
+ */
+function extractMentionAgentIds(value: string, members: Member[]) {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const orderedMembers = [...members].sort((a, b) => b.agent_name.length - a.agent_name.length);
+
+  for (const member of orderedMembers) {
+    const pattern = new RegExp(`(^|\\s)@${escapeMentionRegex(member.agent_name)}(?=$|\\s|[,.!?;:])`, 'g');
+    if (!pattern.test(value) || seen.has(member.agent_id)) continue;
+    seen.add(member.agent_id);
+    ids.push(member.agent_id);
+  }
+
+  return ids;
+}
+
+/**
+ * 解析光标前是否处于 @mention 输入态。
+ * @param {string} value
+ * @param {number} cursor
+ * @returns {{ query: string, start: number, end: number }|null}
+ */
+function resolveMentionDraft(value: string, cursor: number) {
+  const prefix = value.slice(0, cursor);
+  const match = prefix.match(/(^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+
+  return {
+    query: match[2],
+    start: cursor - match[2].length - 1,
+    end: cursor,
+  };
+}
+
 export default function ChannelDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -127,6 +197,11 @@ export default function ChannelDetailPage() {
   const [comment, setComment] = useState('');
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [mentionDraft, setMentionDraft] = useState<{ query: string; start: number; end: number } | null>(null);
+  const [showDiscussionPanel, setShowDiscussionPanel] = useState(false);
+  const [selectedDiscussionAgentIds, setSelectedDiscussionAgentIds] = useState<string[]>([]);
+  const [discussionRounds, setDiscussionRounds] = useState('1');
+  const [startingDiscussion, setStartingDiscussion] = useState(false);
   const [showInvitePanel, setShowInvitePanel] = useState(false);
   const [inviteSearch, setInviteSearch] = useState('');
   const [selectedInviteAgentIds, setSelectedInviteAgentIds] = useState<string[]>([]);
@@ -275,9 +350,11 @@ export default function ChannelDetailPage() {
    */
   const handleReply = (msg: Message) => {
     setReplyTo(msg);
+    setShowDiscussionPanel(false);
     const senderName = msg.sender_name || msg.sender_id.substring(0, 8);
     // 预填 @agentname 以触发 agent bridge 的响应规则
     setComment(`@${senderName} `);
+    setMentionDraft(null);
     // 聚焦输入框
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
@@ -286,6 +363,64 @@ export default function ChannelDetailPage() {
   const handleCancelReply = () => {
     setReplyTo(null);
     setComment('');
+    setMentionDraft(null);
+  };
+
+  /**
+   * 根据当前输入框内容和光标位置刷新 @mention 草稿状态。
+   * @param {string} value
+   * @param {number} cursor
+   */
+  const updateMentionDraft = (value: string, cursor: number) => {
+    setMentionDraft(resolveMentionDraft(value, cursor));
+  };
+
+  /**
+   * 将选中的成员插入输入框中的 @mention 草稿位置。
+   * @param {Member} member
+   */
+  const applyMention = (member: Member) => {
+    if (!mentionDraft || !textareaRef.current) return;
+
+    const nextValue = `${comment.slice(0, mentionDraft.start)}@${member.agent_name} ${comment.slice(mentionDraft.end)}`;
+    const nextCursor = mentionDraft.start + member.agent_name.length + 2;
+    setComment(nextValue);
+    setMentionDraft(null);
+
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) return;
+      textareaRef.current.focus();
+      textareaRef.current.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+
+  /**
+   * 切换线性讨论参与者，保留选择顺序作为循环顺序。
+   * @param {string} agentId
+   */
+  const toggleDiscussionAgent = (agentId: string) => {
+    setSelectedDiscussionAgentIds((prev) =>
+      prev.includes(agentId)
+        ? prev.filter((id) => id !== agentId)
+        : [...prev, agentId]
+    );
+  };
+
+  /**
+   * 切换线性讨论面板显示状态。
+   */
+  const toggleDiscussionPanel = () => {
+    setShowDiscussionPanel((prev) => {
+      const next = !prev;
+      setMentionDraft(null);
+      if (next) {
+        setReplyTo(null);
+      } else {
+        setSelectedDiscussionAgentIds([]);
+        setDiscussionRounds('1');
+      }
+      return next;
+    });
   };
 
   /** 切换待邀请 Agent 的选择状态 */
@@ -317,6 +452,35 @@ export default function ChannelDetailPage() {
       // 错误在 useApi 中处理
     } finally {
       setInviting(false);
+    }
+  };
+
+  /** 发起线性多 Agent 讨论，会按选中顺序循环并以完整循环计一轮 */
+  const handleStartDiscussion = async () => {
+    const trimmed = comment.trim();
+    if (!id || !trimmed || startingDiscussion) return;
+
+    setStartingDiscussion(true);
+    try {
+      await apiFetch<StartDiscussionResponse>(`/admin/channels/${id}/discussions`, {
+        method: 'POST',
+        body: JSON.stringify({
+          content: trimmed,
+          participantAgentIds: selectedDiscussionAgentIds,
+          maxRounds: Number.parseInt(discussionRounds, 10),
+        }),
+      });
+
+      setComment('');
+      setReplyTo(null);
+      setMentionDraft(null);
+      setShowDiscussionPanel(false);
+      setSelectedDiscussionAgentIds([]);
+      setDiscussionRounds('1');
+    } catch {
+      // 错误在 useApi 中处理
+    } finally {
+      setStartingDiscussion(false);
     }
   };
 
@@ -353,16 +517,19 @@ export default function ChannelDetailPage() {
     if (!trimmed || sending) return;
     setSending(true);
     try {
+      const mentionAgentIds = channel ? extractMentionAgentIds(trimmed, channel.members || []) : [];
       await apiFetch(`/admin/channels/${id}/messages`, {
         method: 'POST',
         body: JSON.stringify({
           content: trimmed,
           contentType: 'text',
           replyTo: replyTo?.id || null,
+          mentionAgentIds,
         }),
       });
       setComment('');
       setReplyTo(null);
+      setMentionDraft(null);
       // 新消息会通过 WebSocket 推送，无需手动追加
     } catch {
       // 错误在 useApi 中处理
@@ -375,7 +542,8 @@ export default function ChannelDetailPage() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      handleSendComment();
+      if (showDiscussionPanel) handleStartDiscussion();
+      else handleSendComment();
     }
   };
 
@@ -395,6 +563,7 @@ export default function ChannelDetailPage() {
   const sortedMessages = [...messages].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
+  const memberNameMap = new Map((channel.members || []).map((member) => [member.agent_id, member.agent_name]));
   const memberIds = new Set((channel.members || []).map((member) => member.agent_id));
   const availableAgents = allAgents.filter((agent) => !memberIds.has(agent.id));
   const filteredAvailableAgents = availableAgents.filter((agent) => {
@@ -405,6 +574,15 @@ export default function ChannelDetailPage() {
       (agent.description || '').toLowerCase().includes(keyword)
     );
   });
+  const mentionCandidates = (channel.members || [])
+    .filter((member) => {
+      if (!mentionDraft) return false;
+      const keyword = mentionDraft.query.trim().toLowerCase();
+      if (!keyword) return true;
+      return member.agent_name.toLowerCase().includes(keyword);
+    })
+    .slice(0, 8);
+  const discussionCandidates = (channel.members || []).filter((member) => member.online);
 
   return (
     <div className="flex flex-col h-full -m-8">
@@ -493,6 +671,7 @@ export default function ChannelDetailPage() {
                   const compact = sameSender && timeDiff < 300000;
                   const color = getAgentColor(msg.sender_id);
                   const isAdmin = msg.sender_id.startsWith('admin:');
+                  const discussion = msg.discussion;
 
                   return (
                     <div
@@ -515,6 +694,14 @@ export default function ChannelDetailPage() {
                           <span className="text-xs text-gray-400">
                             {formatTime(msg.created_at)}
                           </span>
+                          {discussion && (
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${discussion.status === 'active' ? 'bg-indigo-50 text-indigo-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                              线性讨论 {discussion.currentRound}/{discussion.maxRounds} 轮
+                              {discussion.nextSpeakerId
+                                ? ` · 下一位 ${memberNameMap.get(discussion.nextSpeakerId) || discussion.nextSpeakerId.slice(0, 8)}`
+                                : ' · 已收束'}
+                            </span>
+                          )}
                         </div>
                       )}
                       <div className={`text-sm text-gray-800 leading-relaxed ${compact ? '' : 'pl-11'} relative`}>
@@ -563,21 +750,122 @@ export default function ChannelDetailPage() {
                   </button>
                 </div>
               )}
+              {showDiscussionPanel && (
+                <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-indigo-900">线性循环讨论</div>
+                      <div className="text-xs text-indigo-700 mt-0.5">
+                        按你勾选的顺序循环，完整走完一遍记为 1 轮。
+                      </div>
+                    </div>
+                    <button
+                      onClick={toggleDiscussionPanel}
+                      className="text-xs px-2.5 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition-colors"
+                    >
+                      取消讨论模式
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-indigo-800">
+                      轮次
+                    </label>
+                    <input
+                      value={discussionRounds}
+                      onChange={(e) => setDiscussionRounds(e.target.value.replace(/[^\d]/g, '').slice(0, 2) || '1')}
+                      className="w-16 rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    />
+                    <span className="text-xs text-indigo-700">
+                      当前顺序：{selectedDiscussionAgentIds.map((agentId) => memberNameMap.get(agentId) || agentId.slice(0, 8)).join(' → ') || '未选择'}
+                    </span>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto rounded-lg border border-indigo-100 bg-white divide-y divide-indigo-50">
+                    {discussionCandidates.length === 0 ? (
+                      <div className="px-3 py-6 text-center text-xs text-indigo-400">
+                        当前没有在线成员可参与线性讨论
+                      </div>
+                    ) : (
+                      discussionCandidates.map((member) => (
+                        <label key={member.agent_id} className="flex items-center gap-3 px-3 py-2 hover:bg-indigo-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedDiscussionAgentIds.includes(member.agent_id)}
+                            onChange={() => toggleDiscussionAgent(member.agent_id)}
+                            className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-gray-900 truncate">{member.agent_name}</div>
+                            <div className="text-[11px] text-indigo-600 mt-0.5">
+                              {selectedDiscussionAgentIds.includes(member.agent_id)
+                                ? `顺序 ${selectedDiscussionAgentIds.indexOf(member.agent_id) + 1}`
+                                : '勾选后按当前顺序进入循环'}
+                            </div>
+                          </div>
+                          <StatusBadge status={member.online ? 'online' : 'offline'} />
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="flex items-end gap-3">
-                <div className="flex-1">
+                <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
                     value={comment}
-                    onChange={(e) => setComment(e.target.value)}
+                    onChange={(e) => {
+                      setComment(e.target.value);
+                      updateMentionDraft(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                    }}
+                    onClick={(e) => updateMentionDraft(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
+                    onKeyUp={(e) => updateMentionDraft(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
                     onKeyDown={handleKeyDown}
-                    placeholder={replyTo ? `回复 ${replyTo.sender_name || replyTo.sender_id.substring(0, 8)}，触发 Agent WS 回复… (Ctrl+Enter 发送)` : '以管理员身份发送评论… (Ctrl+Enter 发送)'}
+                    placeholder={
+                      showDiscussionPanel
+                        ? '输入论题描述，选定参与顺序后发起线性讨论… (Ctrl+Enter 开始)'
+                        : replyTo
+                          ? `回复 ${replyTo.sender_name || replyTo.sender_id.substring(0, 8)}，触发 Agent WS 回复… (Ctrl+Enter 发送)`
+                          : '以管理员身份发送评论，输入 @ 可选择频道成员… (Ctrl+Enter 发送)'
+                    }
                     rows={2}
                     className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder-gray-400"
                   />
+                  {mentionDraft && mentionCandidates.length > 0 && (
+                    <div className="absolute left-0 right-0 bottom-full mb-2 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+                      {mentionCandidates.map((member) => (
+                        <button
+                          key={member.agent_id}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            applyMention(member);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors"
+                        >
+                          <div className="text-sm font-medium text-gray-900">@{member.agent_name}</div>
+                          <div className="text-[11px] text-gray-500">
+                            {member.online ? '在线，可立即触发' : '离线，仅保留消息语义'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <button
+                  onClick={showDiscussionPanel ? handleStartDiscussion : toggleDiscussionPanel}
+                  disabled={
+                    showDiscussionPanel
+                      ? !comment.trim() || selectedDiscussionAgentIds.length < 2 || startingDiscussion
+                      : false
+                  }
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                >
+                  <Users size={14} />
+                  {showDiscussionPanel ? (startingDiscussion ? '发起中...' : '开始讨论') : '线性讨论'}
+                </button>
+                <button
                   onClick={handleSendComment}
-                  disabled={!comment.trim() || sending}
+                  disabled={!comment.trim() || sending || showDiscussionPanel}
                   className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 >
                   <Send size={14} />
@@ -585,7 +873,7 @@ export default function ChannelDetailPage() {
                 </button>
               </div>
               <p className="text-xs text-gray-400 mt-1.5">
-                消息将以 <span className="font-medium text-yellow-600">[Admin]</span> 身份发送，所有频道成员可见
+                消息将以 <span className="font-medium text-yellow-600">[Admin]</span> 身份发送，所有频道成员可见；只有被 @ 或被 reply 的 agent 才应自动回复
               </p>
             </div>
           )}
