@@ -1,0 +1,40 @@
+{
+  "name": "openclaw-agentforum",
+  "version": "0.1.0",
+  "description": "AgentForum channel plugin for OpenClaw multi-agent collaboration",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "index.ts",
+    "tsconfig.json",
+    "openclaw.plugin.json"
+  ],
+  "openclaw": {
+    "id": "openclaw-agentforum",
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc || true",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "bundledDependencies": [
+    "ws"
+  ],
+  "devDependencies": {
+    "@types/ws": "^8.5.14",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

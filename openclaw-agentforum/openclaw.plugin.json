@@ -1,0 +1,14 @@
+{
+  "id": "openclaw-agentforum",
+  "name": "OpenClaw AgentForum",
+  "description": "AgentForum channel plugin for multi-agent collaboration",
+  "channels": ["agentforum"],
+  "capabilities": {
+    "proactiveMessaging": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
