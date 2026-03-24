@@ -11,6 +11,35 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   const LINEAR_DISCUSSION_MODE = 'linear';
 
   /**
+   * 统一补齐消息发送者展示名。
+   * 普通 Agent 优先使用查询结果，管理员消息则从 sender_id 还原展示名。
+   * @param {string|null|undefined} senderId
+   * @param {string|null|undefined} senderName
+   * @returns {string|null}
+   */
+  function resolveDisplaySenderName(senderId, senderName) {
+    if (senderName) return senderName;
+    if (typeof senderId === 'string' && senderId.startsWith('admin:')) {
+      return `[Admin] ${senderId.slice('admin:'.length)}`;
+    }
+    return null;
+  }
+
+  /**
+   * 生成回复消息的固定预览文案。
+   * 只保留前 maxLength 个字符，超出时追加省略号，供前端直接展示。
+   * @param {string|null|undefined} content
+   * @param {number} [maxLength=15]
+   * @returns {string|null}
+   */
+  function buildReplyPreview(content, maxLength = 15) {
+    if (typeof content !== 'string' || !content.length) return null;
+    return content.length > maxLength
+      ? `${content.slice(0, maxLength)}...`
+      : content;
+  }
+
+  /**
    * 去重并清理字符串数组。
    * @param {unknown} value
    * @returns {string[]}
@@ -129,11 +158,21 @@ export function createChannelMessagingService({ db, tryParseJson }) {
    */
   function formatMessage(message) {
     if (!message) return null;
+    const {
+      reply_content: replyContent,
+      reply_sender_id: replySenderId,
+      reply_sender_name: replySenderName,
+      ...rest
+    } = message;
+    const mentions = tryParseJson(message.mentions);
 
     return {
-      ...message,
-      mentions: Array.isArray(tryParseJson(message.mentions)) ? tryParseJson(message.mentions) : [],
+      ...rest,
+      sender_name: resolveDisplaySenderName(message.sender_id, message.sender_name),
+      mentions: Array.isArray(mentions) ? mentions : [],
       reply_target_agent_id: message.reply_target_agent_id || null,
+      reply_sender_name: resolveDisplaySenderName(replySenderId, replySenderName),
+      reply_preview: buildReplyPreview(replyContent),
       discussion_session_id: message.discussion_session_id || null,
       discussion: tryParseJson(message.discussion_state) || null,
     };
@@ -154,8 +193,13 @@ export function createChannelMessagingService({ db, tryParseJson }) {
    * @returns {object|null}
    */
   function getFormattedMessageById(messageId) {
-    const row = db.get(`SELECT m.*, a.name AS sender_name
+    const row = db.get(`SELECT m.*, a.name AS sender_name,
+      rm.sender_id AS reply_sender_id,
+      ra.name AS reply_sender_name,
+      rm.content AS reply_content
       FROM messages m
+      LEFT JOIN messages rm ON rm.id = m.reply_to
+      LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.id = ${db.esc(messageId)}`);
     return formatMessage(row);
@@ -189,9 +233,11 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       return { message: null, replyTargetAgentId: null };
     }
 
-    const replyMessage = db.get(`SELECT id, sender_id FROM messages
-      WHERE id = ${db.esc(replyTo)}
-        AND channel_id = ${db.esc(channelId)}`);
+    const replyMessage = db.get(`SELECT m.id, m.sender_id, m.content, a.name AS sender_name
+      FROM messages m
+      LEFT JOIN agents a ON a.id = m.sender_id
+      WHERE m.id = ${db.esc(replyTo)}
+        AND m.channel_id = ${db.esc(channelId)}`);
 
     return {
       message: replyMessage,
@@ -493,6 +539,9 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       created_at: now,
       mentions: JSON.stringify(mentions),
       reply_target_agent_id: replyTargetAgentId,
+      reply_sender_id: replyMessage?.sender_id || null,
+      reply_sender_name: replyMessage?.sender_name || null,
+      reply_content: replyMessage?.content || null,
       discussion_session_id: discussionSessionId || null,
       discussion_state: discussionState ? JSON.stringify(discussionState) : null,
     });

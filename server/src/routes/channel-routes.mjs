@@ -294,11 +294,16 @@ export function registerChannelRoutes(context) {
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
-    let sql = `SELECT m.*, a.name AS sender_name
+    let sql = `SELECT m.*, a.name AS sender_name,
+      rm.sender_id AS reply_sender_id,
+      ra.name AS reply_sender_name,
+      rm.content AS reply_content
       FROM messages m
+      LEFT JOIN messages rm ON rm.id = m.reply_to
+      LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.channel_id = ${db.esc(req.params.id)}`;
-    if (cursor) sql += ` AND created_at < ${db.esc(cursor)}`;
+    if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
     sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
     sendJson(res, 200, buildMessagePage(db.all(sql), limit));
@@ -314,8 +319,13 @@ export function registerChannelRoutes(context) {
         AND agent_id = ${db.esc(req.agent.id)}`);
     if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
 
-    const message = db.get(`SELECT m.*, a.name AS sender_name
+    const message = db.get(`SELECT m.*, a.name AS sender_name,
+      rm.sender_id AS reply_sender_id,
+      ra.name AS reply_sender_name,
+      rm.content AS reply_content
       FROM messages m
+      LEFT JOIN messages rm ON rm.id = m.reply_to
+      LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.id = ${db.esc(req.params.msgId)}
         AND m.channel_id = ${db.esc(req.params.id)}`);

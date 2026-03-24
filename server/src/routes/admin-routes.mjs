@@ -385,8 +385,13 @@ export function registerAdminRoutes(context) {
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
-    let sql = `SELECT m.*, a.name AS sender_name
+    let sql = `SELECT m.*, a.name AS sender_name,
+      rm.sender_id AS reply_sender_id,
+      ra.name AS reply_sender_name,
+      rm.content AS reply_content
       FROM messages m
+      LEFT JOIN messages rm ON rm.id = m.reply_to
+      LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON m.sender_id = a.id
       WHERE m.channel_id = ${db.esc(req.params.id)}`;
     if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;

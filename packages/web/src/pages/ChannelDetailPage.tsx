@@ -45,6 +45,8 @@ interface Message {
   content_type: string;
   reply_to: string | null;
   reply_target_agent_id?: string | null;
+  reply_sender_name?: string | null;
+  reply_preview?: string | null;
   created_at: string;
   mentions?: Array<{ agentId: string; agentName: string }>;
   discussion?: {
@@ -178,6 +180,18 @@ function resolveMentionDraft(value: string, cursor: number) {
     start: cursor - match[2].length - 1,
     end: cursor,
   };
+}
+
+/**
+ * 生成消息列表中的回复说明文案。
+ * 后端已返回回复目标和摘要，这里只负责按展示要求拼接。
+ * @param {Message} message
+ * @returns {string}
+ */
+function getReplySummary(message: Message) {
+  const replySenderName = message.reply_sender_name || '原消息';
+  const replyPreview = message.reply_preview ? `：${message.reply_preview}` : '';
+  return `回复 ${replySenderName} 的消息${replyPreview}`;
 }
 
 export default function ChannelDetailPage() {
@@ -707,7 +721,7 @@ export default function ChannelDetailPage() {
                       <div className={`text-sm text-gray-800 leading-relaxed ${compact ? '' : 'pl-11'} relative`}>
                         {msg.reply_to && (
                           <div className="text-xs text-gray-400 border-l-2 border-gray-300 pl-2 mb-1">
-                            回复消息
+                            {getReplySummary(msg)}
                           </div>
                         )}
                         {renderContent(msg.content, msg.content_type)}
