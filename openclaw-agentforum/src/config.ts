@@ -3,6 +3,8 @@
  *
  * 负责从 OpenClaw 的全局配置 (openclaw.json) 中解析 AgentForum 账户信息。
  * 支持单账号（顶层字段）和多账号（accounts 对象）两种配置格式。
+ * 一旦存在命名账户，所有账户都只能读取各自 `accounts[accountId]` 下的凭证，
+ * 不再回退到顶层字段，避免多个 OpenClaw account 误绑定到同一个 Forum Agent。
  *
  * 配置路径: channels.agentforum
  *
@@ -72,6 +74,49 @@ function getAccountsMap(
 }
 
 /**
+ * 判断当前配置段是否已经进入命名账户模式。
+ *
+ * @param section - agentforum 配置段
+ * @returns 是否存在至少一个命名账户
+ */
+function hasNamedAccounts(section: Record<string, unknown>): boolean {
+  const accounts = getAccountsMap(section);
+  return Boolean(accounts && Object.keys(accounts).length > 0);
+}
+
+/**
+ * 解析账户配置源。
+ * 在命名账户模式下，只允许读取 `accounts[accountId]`；
+ * 顶层字段仅在纯单账号模式下用于 `default` 账户。
+ *
+ * @param section - agentforum 配置段
+ * @param accountId - 目标账户 ID
+ * @returns 账户配置源，不存在时返回空对象
+ */
+function resolveAccountConfigSource(
+  section: Record<string, unknown>,
+  accountId: string
+): AgentForumAccountConfig {
+  const accounts = getAccountsMap(section);
+  if (hasNamedAccounts(section)) {
+    return accounts?.[accountId] ?? {};
+  }
+
+  if (accountId !== DEFAULT_ACCOUNT_ID) {
+    return {};
+  }
+
+  return {
+    apiKey: section.apiKey as string | undefined,
+    agentId: section.agentId as string | undefined,
+    channelId: section.channelId as string | undefined,
+    name: section.name as string | undefined,
+    enabled: section.enabled as boolean | undefined,
+    forumUrl: section.forumUrl as string | undefined,
+  };
+}
+
+/**
  * 列出所有已配置的账户 ID
  *
  * @param cfg - OpenClaw 全局配置
@@ -81,19 +126,19 @@ export function listAgentForumAccountIds(cfg: OpenClawConfig): string[] {
   const section = getChannelSection(cfg);
   if (!section) return [];
 
-  const accounts = getAccountsMap(section);
-  if (!accounts) {
+  if (!hasNamedAccounts(section)) {
     // 单账号模式：顶层有 apiKey 就认为存在 default 账户
-    if (section.apiKey) return [DEFAULT_ACCOUNT_ID];
+    if (section.apiKey || section.agentId) return [DEFAULT_ACCOUNT_ID];
     return [];
   }
 
-  return Object.keys(accounts);
+  return Object.keys(getAccountsMap(section) ?? {});
 }
 
 /**
  * 解析指定账户的完整配置
- * 优先从 accounts[accountId] 读取，回退到顶层字段（单账号兼容）
+ * 命名账户模式下只读取 `accounts[accountId]`；
+ * 纯单账号模式下才读取顶层字段。
  *
  * @param cfg - OpenClaw 全局配置
  * @param accountId - 账户 ID，默认 "default"
@@ -105,29 +150,20 @@ export function resolveAgentForumAccount(
 ): ResolvedAgentForumAccount {
   const resolvedId = accountId ?? DEFAULT_ACCOUNT_ID;
   const section = getChannelSection(cfg) ?? {};
-  const accounts = getAccountsMap(section);
-  const namedAccount = accounts?.[resolvedId];
+  const source = resolveAccountConfigSource(section, resolvedId);
 
-  // 优先使用命名账户的值，回退到顶层字段
-  const apiKey =
-    namedAccount?.apiKey ?? (section.apiKey as string | undefined) ?? "";
-  const agentId =
-    namedAccount?.agentId ?? (section.agentId as string | undefined) ?? "";
-  const channelId =
-    namedAccount?.channelId ?? (section.channelId as string | undefined) ?? "";
-  const forumUrl =
-    namedAccount?.forumUrl ??
-    (section.forumUrl as string | undefined) ??
-    DEFAULT_FORUM_URL;
+  const apiKey = source.apiKey ?? "";
+  const agentId = source.agentId ?? "";
+  const channelId = source.channelId ?? "";
+  const forumUrl = source.forumUrl ?? DEFAULT_FORUM_URL;
 
   return {
     accountId: resolvedId,
     apiKey,
     agentId,
     channelId,
-    name: namedAccount?.name ?? (section.name as string | undefined),
-    enabled:
-      namedAccount?.enabled ?? (section.enabled as boolean | undefined) ?? true,
+    name: source.name,
+    enabled: source.enabled ?? true,
     forumUrl,
   };
 }
@@ -135,13 +171,17 @@ export function resolveAgentForumAccount(
 /**
  * 获取默认账户 ID
  *
- * @param _cfg - OpenClaw 全局配置（当前未使用，保留接口一致性）
+ * @param cfg - OpenClaw 全局配置
  * @returns 默认账户 ID
  */
 export function resolveDefaultAgentForumAccountId(
-  _cfg: OpenClawConfig
+  cfg: OpenClawConfig
 ): string {
-  return DEFAULT_ACCOUNT_ID;
+  const accountIds = listAgentForumAccountIds(cfg);
+  if (accountIds.includes(DEFAULT_ACCOUNT_ID)) {
+    return DEFAULT_ACCOUNT_ID;
+  }
+  return accountIds[0] ?? DEFAULT_ACCOUNT_ID;
 }
 
 /**
@@ -180,6 +220,7 @@ export function applyAgentForumAccountConfig(
     agentId?: string;
     channelId?: string;
     name?: string;
+    enabled?: boolean;
     forumUrl?: string;
   }
 ): OpenClawConfig {

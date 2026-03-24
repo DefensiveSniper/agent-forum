@@ -40,6 +40,7 @@ CLAUDE.md
 bridges/node_modules/
 bridges/.claude_code_agent
 bridges/.claude_code_agent.json
+bridges/.codex_agent
 
 AgentForum_ProjectPlan_v1.1.md
 AgentForum_ProjectPlan_v1.1.docx

@@ -12,8 +12,10 @@ import type {
 } from "openclaw/plugin-sdk";
 import {
   DEFAULT_ACCOUNT_ID,
+  applyAgentForumAccountConfig,
   listAgentForumAccountIds,
   resolveAgentForumAccount,
+  resolveDefaultAgentForumAccountId,
   isAgentForumAccountConfigured,
 } from "./config.js";
 
@@ -43,8 +45,29 @@ interface Prompter {
  * 解析默认账户 ID
  */
 function resolveDefaultAccountId(cfg: OpenClawConfig): string {
-  const ids = listAgentForumAccountIds(cfg);
-  return ids[0] ?? DEFAULT_ACCOUNT_ID;
+  return resolveDefaultAgentForumAccountId(cfg);
+}
+
+/**
+ * 打开 AgentForum 通道总开关，同时保留已有账户配置。
+ *
+ * @param cfg - 当前 OpenClaw 配置
+ * @returns 打开 channels.agentforum.enabled 后的新配置
+ */
+function enableAgentForumChannel(cfg: OpenClawConfig): OpenClawConfig {
+  const channels = (cfg.channels as Record<string, unknown> | undefined) ?? {};
+  const section = (channels.agentforum as Record<string, unknown> | undefined) ?? {};
+
+  return {
+    ...cfg,
+    channels: {
+      ...channels,
+      agentforum: {
+        ...section,
+        enabled: true,
+      },
+    },
+  };
 }
 
 /**
@@ -145,19 +168,13 @@ export const agentforumOnboardingAdapter: ChannelOnboardingAdapter = {
         initialValue: true,
       });
       if (keepEnv) {
-        next = {
-          ...next,
-          channels: {
-            ...next.channels,
-            agentforum: {
-              ...(next.channels?.agentforum as Record<string, unknown> || {}),
-              enabled: true,
-              apiKey: envApiKey,
-              agentId: envAgentId,
-              ...(envForumUrl ? { forumUrl: envForumUrl } : {}),
-            },
-          },
-        };
+        const saved = applyAgentForumAccountConfig(next, accountId, {
+          enabled: true,
+          apiKey: envApiKey,
+          agentId: envAgentId,
+          ...(envForumUrl ? { forumUrl: envForumUrl } : {}),
+        });
+        next = enableAgentForumChannel(saved);
         return { success: true, cfg: next as any, accountId };
       }
     }
@@ -209,47 +226,14 @@ export const agentforumOnboardingAdapter: ChannelOnboardingAdapter = {
 
     // 写入配置
     if (apiKey && agentId) {
-      const existingSection = (next.channels?.agentforum as Record<string, unknown>) || {};
+      const saved = applyAgentForumAccountConfig(next, accountId, {
+        enabled: true,
+        apiKey,
+        agentId,
+        forumUrl,
+      });
 
-      if (accountId === DEFAULT_ACCOUNT_ID) {
-        next = {
-          ...next,
-          channels: {
-            ...next.channels,
-            agentforum: {
-              ...existingSection,
-              enabled: true,
-              apiKey,
-              agentId,
-              forumUrl,
-            },
-          },
-        };
-      } else {
-        const existingAccounts = (existingSection.accounts as Record<string, unknown>) || {};
-        const existingAccount = (existingAccounts[accountId] as Record<string, unknown>) || {};
-
-        next = {
-          ...next,
-          channels: {
-            ...next.channels,
-            agentforum: {
-              ...existingSection,
-              enabled: true,
-              accounts: {
-                ...existingAccounts,
-                [accountId]: {
-                  ...existingAccount,
-                  enabled: true,
-                  apiKey,
-                  agentId,
-                  forumUrl,
-                },
-              },
-            },
-          },
-        };
-      }
+      next = enableAgentForumChannel(saved);
     }
 
     return { success: true, cfg: next as any, accountId };
