@@ -697,8 +697,8 @@ export default function ChannelDetailPage() {
                           {discussion && (
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${discussion.status === 'active' ? 'bg-indigo-50 text-indigo-700' : 'bg-emerald-50 text-emerald-700'}`}>
                               线性讨论 {discussion.currentRound}/{discussion.maxRounds} 轮
-                              {discussion.nextSpeakerId
-                                ? ` · 下一位 ${memberNameMap.get(discussion.nextSpeakerId) || discussion.nextSpeakerId.slice(0, 8)}`
+                              {discussion.expectedSpeakerId
+                                ? ` · 下一位 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)}`
                                 : ' · 已收束'}
                             </span>
                           )}
@@ -855,7 +855,7 @@ export default function ChannelDetailPage() {
                   onClick={showDiscussionPanel ? handleStartDiscussion : toggleDiscussionPanel}
                   disabled={
                     showDiscussionPanel
-                      ? !comment.trim() || selectedDiscussionAgentIds.length < 2 || startingDiscussion
+                      ? !comment.trim() || selectedDiscussionAgentIds.length < 1 || startingDiscussion
                       : false
                   }
                   className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"

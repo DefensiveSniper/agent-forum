@@ -210,15 +210,15 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   }
 
   /**
-   * 校验并推进线性讨论会话。
+   * 校验并推进线性讨论会话，自动计算下一位 agent 的 mention。
+   * 服务端自动注入正确的 mentions，调用方无需手动指定。
    * @param {object} options
    * @param {object} options.session
    * @param {string} options.senderId
    * @param {string|null|undefined} options.replyTo
-   * @param {Array<{ agentId: string, agentName: string }>} options.mentions
-   * @returns {{ nextState: object, discussionState: object }}
+   * @returns {{ nextState: object, discussionState: object, autoMentions: Array<{ agentId: string, agentName: string }> }}
    */
-  function advanceLinearDiscussion({ session, senderId, replyTo, mentions }) {
+  function advanceLinearDiscussion({ session, senderId, replyTo }) {
     if (!session) {
       throw new Error('Discussion session not found');
     }
@@ -241,13 +241,12 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     const finalTurn = completedAfterReply >= maxRounds;
     const expectedNextAgentId = finalTurn ? null : participantAgentIds[nextIndex];
 
-    if (finalTurn) {
-      if (mentions.length > 0) {
-        throw new Error('Final discussion turn cannot mention the next agent');
-      }
-    } else {
-      if (mentions.length !== 1 || mentions[0].agentId !== expectedNextAgentId) {
-        throw new Error('Linear discussion replies must mention exactly the next agent in order');
+    // 自动计算 mentions：非最后一轮则 @ 下一位 agent，最后一轮不 mention 任何人
+    let autoMentions = [];
+    if (!finalTurn && expectedNextAgentId) {
+      const { agents } = resolveChannelAgents(session.channel_id, [expectedNextAgentId]);
+      if (agents.length > 0) {
+        autoMentions = [{ agentId: agents[0].id, agentName: agents[0].name }];
       }
     }
 
@@ -262,6 +261,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     return {
       nextState,
       discussionState: buildDiscussionStateSnapshot(nextState),
+      autoMentions,
     };
   }
 
@@ -287,8 +287,8 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     isAgentOnline,
   }) {
     const normalizedParticipantIds = normalizeIdList(participantAgentIds);
-    if (normalizedParticipantIds.length < 2) {
-      throw new Error('Linear discussion requires at least 2 participant agents');
+    if (normalizedParticipantIds.length < 1) {
+      throw new Error('Linear discussion requires at least 1 participant agent');
     }
 
     const resolvedRounds = parsePositiveInt(maxRounds);
@@ -419,7 +419,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   }) {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    const { mentions, missingIds } = resolveMentions(channelId, mentionAgentIds);
+    let { mentions, missingIds } = resolveMentions(channelId, mentionAgentIds);
     if (missingIds.length > 0) {
       throw new Error(`Some mention agents are not channel members: ${missingIds.join(', ')}`);
     }
@@ -438,8 +438,9 @@ export function createChannelMessagingService({ db, tryParseJson }) {
         session,
         senderId,
         replyTo,
-        mentions,
       });
+      // 服务端自动注入讨论顺序中下一位 agent 的 mention，覆盖调用方传入的 mentions
+      mentions = result.autoMentions;
       const persistedNextState = {
         ...result.nextState,
         last_message_id: id,

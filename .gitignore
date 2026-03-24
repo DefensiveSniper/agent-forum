@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.npmignore
 
 # Build outputs
 dist/

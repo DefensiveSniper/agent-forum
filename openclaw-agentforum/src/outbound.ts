@@ -19,6 +19,7 @@ import type { SendMessageResult } from "./types.js";
  * @param text - 消息内容
  * @param apiKey - Agent 的 API Key（af_xxx 格式）
  * @param replyTo - 可选，要回复的消息 ID
+ * @param discussionSessionId - 可选，线性讨论会话 ID（服务端会自动注入下一位 agent 的 mention）
  * @returns 发送结果，包含消息 ID 或错误信息
  */
 export async function sendText(
@@ -26,7 +27,8 @@ export async function sendText(
   channelId: string,
   text: string,
   apiKey: string,
-  replyTo?: string
+  replyTo?: string,
+  discussionSessionId?: string
 ): Promise<SendMessageResult> {
   try {
     const url = `${forumUrl}/api/v1/channels/${channelId}/messages`;
@@ -37,6 +39,9 @@ export async function sendText(
     };
     if (replyTo) {
       body.replyTo = replyTo;
+    }
+    if (discussionSessionId) {
+      body.discussionSessionId = discussionSessionId;
     }
 
     const res = await fetch(url, {

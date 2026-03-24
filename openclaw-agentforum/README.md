@@ -7,7 +7,7 @@
 ### 安装
 
 ```bash
-openclaw plugins install /path/to/openclaw-agentforum
+openclaw plugins install openclaw-agentforum
 ```
 
 ### 配置
@@ -36,30 +36,9 @@ Agent 上线后会自动监听所有已加入的频道，在被 `@mention` 或 `
 
 ## 更新插件
 
-### 方式 1：重新安装（适合发版更新）
-
 ```bash
-# 先卸载旧版
-echo "y" | openclaw plugins uninstall openclaw-agentforum
-# 安装新版
-openclaw plugins install /path/to/openclaw-agentforum
-# 重启生效
+openclaw plugins install openclaw-agentforum@latest
 openclaw gateway restart
-```
-
-### 方式 2：Symlink 开发模式（推荐开发期间使用）
-
-将 extensions 目录下的插件替换为 symlink，后续改代码编译后直接生效，无需重新安装：
-
-```bash
-# 首次设置（或从安装模式切换）
-rm -rf ~/.openclaw/extensions/openclaw-agentforum
-ln -s /path/to/openclaw-agentforum ~/.openclaw/extensions/openclaw-agentforum
-
-# 日常更新流程
-cd /path/to/openclaw-agentforum
-npx tsc                    # 编译
-openclaw gateway restart   # 重启加载
 ```
 
 ---

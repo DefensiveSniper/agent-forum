@@ -108,6 +108,28 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   };
 
   /**
+   * 从消息中提取线性讨论上下文（如果本 agent 是预期发言者）
+   * 返回 discussionSessionId 和应回复的消息 ID
+   *
+   * @param message - 消息对象
+   * @returns 讨论上下文，或 null（非讨论消息 / 非本 agent 发言）
+   */
+  const extractDiscussionContext = (message: MessageNewPayload["message"]): {
+    discussionSessionId: string;
+    replyToMessageId: string;
+  } | null => {
+    const discussion = message.discussion;
+    if (!discussion || discussion.status !== "active") return null;
+    if (discussion.expectedSpeakerId !== account.agentId) return null;
+
+    return {
+      discussionSessionId: discussion.id,
+      // 回复当前消息（它就是讨论中的最新消息 = lastMessageId）
+      replyToMessageId: message.id,
+    };
+  };
+
+  /**
    * 处理收到的 message.new 事件
    * 所有消息都会进入上下文，但只有被 @mention 或 reply 时才触发 AI 回复
    *
@@ -124,13 +146,20 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
     log?.info(`[af] 收到 [${sender.name}]: ${userContent.slice(0, 80)}`);
 
+    // 提取线性讨论上下文（如果有）
+    const discussionCtx = extractDiscussionContext(message);
+
     // 只有被 @mention 或 reply 时才触发 AI 回复
     if (!shouldRespond(message)) {
       log?.debug?.(`[af] 消息未 @mention 或 reply 本 Agent，跳过回复`);
       return;
     }
 
-    log?.info(`[af] 被触发回复 (mention/reply)`);
+    if (discussionCtx) {
+      log?.info(`[af] 被触发回复 (线性讨论 session=${discussionCtx.discussionSessionId})`);
+    } else {
+      log?.info(`[af] 被触发回复 (mention/reply)`);
+    }
 
     try {
       const runtime = getAgentForumRuntime();
@@ -235,15 +264,19 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             log?.info(`[af] deliver 回调触发, kind=${info.kind}, hasText=${Boolean(deliverPayload.text)}`);
             // 处理 AI 的最终文本回复（kind 可能是 "block" 或 "final"），忽略 tool 类型
             if (info.kind !== "tool" && deliverPayload.text) {
+              // 讨论模式下回复到讨论的最新消息并传递 sessionId；普通模式回复原始消息
+              const replyToId = discussionCtx?.replyToMessageId ?? message.id;
+              const sessionId = discussionCtx?.discussionSessionId;
               log?.info(
-                `[af] 回复到频道 ${channelId}: ${deliverPayload.text.slice(0, 50)}...`
+                `[af] 回复到频道 ${channelId}: ${deliverPayload.text.slice(0, 50)}...${sessionId ? ` (discussion=${sessionId})` : ""}`
               );
               const result = await sendText(
                 account.forumUrl,
                 channelId,
                 deliverPayload.text,
                 account.apiKey,
-                message.id // reply to the original message
+                replyToId,
+                sessionId
               );
               if (result.error) {
                 log?.error(`[af] 发送失败: ${result.error}`);

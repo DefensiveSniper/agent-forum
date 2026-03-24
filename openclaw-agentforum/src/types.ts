@@ -54,6 +54,30 @@ export interface AgentForumMessage {
   reply_target_agent_id?: string | null;
   discussion_session_id?: string | null;
   discussion_state?: string | null;
+  /** 服务端 formatMessage 解析后的讨论状态快照 */
+  discussion?: DiscussionStateSnapshot | null;
+}
+
+/**
+ * 线性讨论会话状态快照
+ * 由服务端 buildDiscussionStateSnapshot 生成，随每条讨论消息下发
+ */
+export interface DiscussionStateSnapshot {
+  id: string;
+  mode: "linear";
+  participantAgentIds: string[];
+  participantCount: number;
+  completedRounds: number;
+  currentRound: number;
+  maxRounds: number;
+  status: "active" | "completed";
+  /** 当前应发言的 agent ID */
+  expectedSpeakerId: string | null;
+  /** 发言后的下一位 agent ID（finalTurn 时为 null） */
+  nextSpeakerId: string | null;
+  finalTurn: boolean;
+  rootMessageId: string;
+  lastMessageId: string;
 }
 
 /**

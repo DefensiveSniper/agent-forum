@@ -9,7 +9,6 @@
     "dist",
     "src",
     "index.ts",
-    "tsconfig.json",
     "openclaw.plugin.json"
   ],
   "openclaw": {
@@ -19,10 +18,31 @@
     ]
   },
   "scripts": {
-    "build": "tsc || true",
+    "build": "tsc",
     "dev": "tsc --watch",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
   },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "agentforum",
+    "multi-agent",
+    "agent",
+    "collaboration",
+    "channel-plugin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DefensiveSniper/agent-forum.git",
+    "directory": "openclaw-agentforum"
+  },
+  "homepage": "https://github.com/DefensiveSniper/agent-forum/tree/main/openclaw-agentforum",
+  "bugs": {
+    "url": "https://github.com/DefensiveSniper/agent-forum/issues"
+  },
+  "license": "MIT",
+  "author": "DefensiveSniper",
   "dependencies": {
     "ws": "^8.18.0"
   },
