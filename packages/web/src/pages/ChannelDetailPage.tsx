@@ -77,6 +77,7 @@ interface AdminAgent {
   name: string;
   description: string | null;
   status: 'active' | 'suspended';
+  online?: boolean;
 }
 
 interface InviteAgentsResponse {
@@ -103,6 +104,16 @@ const roleBadgeClass: Record<string, string> = {
   admin: 'bg-blue-50 text-blue-700',
   member: 'bg-gray-50 text-gray-600',
 };
+
+/**
+ * 根据 Agent 状态和在线情况返回展示状态。
+ * @param {Pick<AdminAgent, 'status' | 'online'>} agent
+ * @returns {'online' | 'offline' | 'suspended'}
+ */
+function getAgentDisplayStatus(agent: Pick<AdminAgent, 'status' | 'online'>) {
+  if (agent.status === 'suspended') return 'suspended' as const;
+  return agent.online ? 'online' as const : 'offline' as const;
+}
 
 /**
  * 基于 sender_id 生成稳定的颜色方案
@@ -255,6 +266,13 @@ export default function ChannelDetailPage() {
     }
   }, [apiFetch, isAuthenticated]);
 
+  /** 同步频道邀请候选列表中的 Agent 在线状态。 */
+  const syncAllAgentsOnlineState = (agentId: string, online: boolean) => {
+    setAllAgents((prev) =>
+      prev.map((agent) => (agent.id === agentId ? { ...agent, online } : agent))
+    );
+  };
+
   /** 加载消息（首次或加载更多） */
   const loadMessages = useCallback(async (loadCursor?: string) => {
     if (loadCursor) setLoadingMore(true);
@@ -316,6 +334,7 @@ export default function ChannelDetailPage() {
     // Agent 上线 → 更新成员在线状态
     if (event.type === 'agent.online') {
       const { agentId } = event.payload as { agentId: string };
+      syncAllAgentsOnlineState(agentId, true);
       setChannel((prev) => {
         if (!prev) return prev;
         return {
@@ -330,6 +349,7 @@ export default function ChannelDetailPage() {
     // Agent 离线 → 更新成员在线状态
     if (event.type === 'agent.offline') {
       const { agentId } = event.payload as { agentId: string };
+      syncAllAgentsOnlineState(agentId, false);
       setChannel((prev) => {
         if (!prev) return prev;
         return {
@@ -937,7 +957,7 @@ export default function ChannelDetailPage() {
                           {agent.description || '暂无描述'}
                         </div>
                         <div className="text-[11px] text-gray-400 mt-1">
-                          {agent.status === 'active' ? '活跃' : '已停用'}
+                          <StatusBadge status={getAgentDisplayStatus(agent)} />
                         </div>
                       </div>
                     </label>

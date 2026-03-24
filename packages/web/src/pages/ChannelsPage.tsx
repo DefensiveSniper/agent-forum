@@ -11,6 +11,7 @@ import { useAlertStore } from '@/stores/alert';
 import { useAuthStore } from '@/stores/auth';
 import { timeAgo } from '@/utils/time';
 import EmptyState from '@/components/EmptyState';
+import StatusBadge from '@/components/StatusBadge';
 
 interface Channel {
   id: string;
@@ -26,6 +27,7 @@ interface AdminAgent {
   name: string;
   description: string | null;
   status: 'active' | 'suspended';
+  online?: boolean;
   lastSeenAt: string;
 }
 
@@ -47,6 +49,16 @@ const typeBadgeClass: Record<string, string> = {
   private: 'bg-orange-50 text-orange-600',
   broadcast: 'bg-primary-50 text-primary-600',
 };
+
+/**
+ * 根据 Agent 状态和在线情况返回展示状态。
+ * @param {Pick<AdminAgent, 'status' | 'online'>} agent
+ * @returns {'online' | 'offline' | 'suspended'}
+ */
+function getAgentDisplayStatus(agent: Pick<AdminAgent, 'status' | 'online'>) {
+  if (agent.status === 'suspended') return 'suspended' as const;
+  return agent.online ? 'online' as const : 'offline' as const;
+}
 
 export default function ChannelsPage() {
   const { apiFetch } = useApi();
@@ -139,6 +151,13 @@ export default function ChannelsPage() {
     }
   };
 
+  /** 同步管理端 Agent 列表中的在线状态。 */
+  const syncAdminAgentOnlineState = (agentId: string, online: boolean) => {
+    queryClient.setQueryData<AdminAgent[]>(['admin-agents'], (prev = []) =>
+      prev.map((agent) => (agent.id === agentId ? { ...agent, online } : agent))
+    );
+  };
+
   useEffect(() => {
     if (!isAuthenticated) {
       setShowCreateForm(false);
@@ -148,8 +167,20 @@ export default function ChannelsPage() {
 
   /** 监听频道变更事件，保持列表成员数和存在性同步 */
   useWebSocket((event) => {
-    if (isAuthenticated && ['channel.created', 'channel.deleted', 'member.joined', 'member.left'].includes(event.type)) {
+    if (!isAuthenticated) return;
+
+    if (['channel.created', 'channel.deleted', 'member.joined', 'member.left'].includes(event.type)) {
       void queryClient.invalidateQueries({ queryKey: ['channels'] });
+    }
+
+    if (event.type === 'agent.online') {
+      const { agentId } = event.payload as { agentId: string };
+      syncAdminAgentOnlineState(agentId, true);
+    }
+
+    if (event.type === 'agent.offline') {
+      const { agentId } = event.payload as { agentId: string };
+      syncAdminAgentOnlineState(agentId, false);
     }
   });
 
@@ -273,15 +304,7 @@ export default function ChannelsPage() {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm font-medium text-gray-900">{agent.name}</span>
-                              <span
-                                className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                                  agent.status === 'active'
-                                    ? 'bg-green-50 text-green-600'
-                                    : 'bg-red-50 text-red-600'
-                                }`}
-                              >
-                                {agent.status === 'active' ? '活跃' : '已停用'}
-                              </span>
+                              <StatusBadge status={getAgentDisplayStatus(agent)} />
                             </div>
                             <div className="text-xs text-gray-500 mt-1">
                               {agent.description || '暂无描述'}
