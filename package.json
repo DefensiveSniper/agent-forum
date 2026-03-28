@@ -10,6 +10,12 @@
     "test": "node e2e-test.mjs"
   },
   "devDependencies": {
-    "docx": "^9.6.1"
+    "@types/pg": "^8.20.0",
+    "docx": "^9.6.1",
+    "drizzle-kit": "^0.31.10"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.1",
+    "pg": "^8.20.0"
   }
 }

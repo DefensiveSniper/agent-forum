@@ -1,140 +1,59 @@
 import fs from 'fs';
-import path from 'path';
-import { execFileSync } from 'child_process';
+import pg from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { eq } from 'drizzle-orm';
+import * as schema from './schema.mjs';
 
 /**
- * 确保数据目录存在。
- * @param {string} dataDir
- */
-function ensureDataDir(dataDir) {
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-}
-
-/**
- * 创建 SQLite CLI 数据库访问层。
+ * 创建基于 node-postgres + Drizzle ORM 的数据库访问层。
+ *
+ * 所有业务查询统一通过 `orm`（Drizzle 实例）执行。
+ * `pool` 仅用于 init 阶段的 DDL。
+ *
  * @param {object} options
  * @param {object} options.config
  * @param {string} options.skillDocPath
  * @returns {object}
  */
 export function createDatabase({ config, skillDocPath }) {
-  const dataDir = path.dirname(config.DB_PATH);
+  const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
+  const orm = drizzle(pool, { schema });
 
-  ensureDataDir(dataDir);
-
-  /**
-   * SQL 参数转义，防止注入攻击。
-   * @param {any} value
-   * @returns {string}
-   */
-  function esc(value) {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'boolean') return value ? '1' : '0';
-    if (typeof value === 'number') return String(value);
-    return `'${String(value).replace(/'/g, "''")}'`;
-  }
-
-  /**
-   * 通过 stdin 调用 sqlite3 CLI 执行 SQL，避免共享临时文件引发并发竞争。
-   * @param {string} sql
-   * @returns {string}
-   */
-  function runSql(sql) {
-    return execFileSync(config.SQLITE3_BIN, [config.DB_PATH], {
-      input: sql,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 5000,
-    });
-  }
-
-  /**
-   * 执行 SQL 写操作。
-   * @param {string} sql
-   */
-  function exec(sql) {
-    try {
-      runSql(sql);
-    } catch (err) {
-      console.error('DB Exec Error:', err.stderr || err.message);
-      throw new Error('Database error');
-    }
-  }
-
-  /**
-   * 查询多行数据并返回 JSON 数组。
-   * @param {string} sql
-   * @returns {Array<object>}
-   */
-  function all(sql) {
-    try {
-      const result = runSql(`.mode json\n${sql}`);
-
-      if (!result.trim()) return [];
-      return JSON.parse(result);
-    } catch (err) {
-      console.error('DB Query Error:', err.stderr || err.message);
-      return [];
-    }
-  }
-
-  /**
-   * 查询单行数据。
-   * @param {string} sql
-   * @returns {object|null}
-   */
-  function get(sql) {
-    const rows = all(sql);
-    return rows.length > 0 ? rows[0] : null;
-  }
+  // ─── 初始化 & 生命周期 ────────────────────────────────────────
 
   /**
    * Seed 默认 Skill 文档到数据库。
    * @param {string} id
    * @param {string} filePath
    */
-  function seedSkillDoc(id, filePath) {
-    const existing = get(`SELECT id FROM skill_docs WHERE id = ${esc(id)}`);
+  async function seedSkillDoc(id, filePath) {
+    const [existing] = await orm.select({ id: schema.skillDocs.id }).from(schema.skillDocs).where(eq(schema.skillDocs.id, id));
     if (existing) return;
 
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
       const now = new Date().toISOString();
-      exec(`INSERT INTO skill_docs (id, content, updated_at, updated_by) VALUES (${esc(id)}, ${esc(content)}, ${esc(now)}, 'system')`);
+      await orm.insert(schema.skillDocs).values({ id, content, updated_at: now, updated_by: 'system' });
       console.log(`📄 Skill doc seeded: ${id}`);
     } catch {}
   }
 
   /**
-   * 确保指定表存在某个列；若不存在则执行 ALTER TABLE。
-   * @param {string} tableName
-   * @param {string} columnName
-   * @param {string} columnDefinition
-   */
-  function ensureColumnExists(tableName, columnName, columnDefinition) {
-    const columns = all(`PRAGMA table_info(${tableName})`);
-    if (columns.some((column) => column.name === columnName)) return;
-
-    exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition};`);
-  }
-
-  /**
    * 初始化数据库表结构和索引。
+   * 使用原生 SQL 执行 DDL，确保兼容已有数据库。
    */
-  function init() {
+  async function init() {
     console.log('🔄 Initializing database...');
 
-    exec(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS admin_users (
         id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
         role TEXT DEFAULT 'admin', created_at TEXT
       );
       CREATE TABLE IF NOT EXISTS invite_codes (
         id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, label TEXT, created_by TEXT,
-        used_by TEXT, max_uses INT DEFAULT 1, uses_count INT DEFAULT 0,
-        expires_at TEXT, revoked INT DEFAULT 0, created_at TEXT
+        used_by TEXT, max_uses INTEGER DEFAULT 1, uses_count INTEGER DEFAULT 0,
+        expires_at TEXT, revoked INTEGER DEFAULT 0, created_at TEXT
       );
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT,
@@ -143,17 +62,19 @@ export function createDatabase({ config, skillDocPath }) {
       );
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
-        type TEXT DEFAULT 'public', created_by TEXT, max_members INT DEFAULT 100,
-        is_archived INT DEFAULT 0, created_at TEXT, updated_at TEXT
+        type TEXT DEFAULT 'public', created_by TEXT, max_members INTEGER DEFAULT 100,
+        is_archived INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT
       );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, sender_id TEXT NOT NULL,
-        content TEXT, content_type TEXT DEFAULT 'text', reply_to TEXT, created_at TEXT
+        content TEXT, content_type TEXT DEFAULT 'text', reply_to TEXT, created_at TEXT,
+        mentions TEXT, reply_target_agent_id TEXT,
+        discussion_session_id TEXT, discussion_state TEXT
       );
       CREATE TABLE IF NOT EXISTS discussion_sessions (
         id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, root_message_id TEXT NOT NULL,
-        participant_agent_ids TEXT NOT NULL, current_index INT DEFAULT 0,
-        completed_rounds INT DEFAULT 0, max_rounds INT NOT NULL,
+        participant_agent_ids TEXT NOT NULL, current_index INTEGER DEFAULT 0,
+        completed_rounds INTEGER DEFAULT 0, max_rounds INTEGER NOT NULL,
         next_agent_id TEXT, last_message_id TEXT, status TEXT DEFAULT 'active',
         created_by TEXT, created_at TEXT, updated_at TEXT, closed_at TEXT
       );
@@ -174,24 +95,19 @@ export function createDatabase({ config, skillDocPath }) {
       CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
       CREATE INDEX IF NOT EXISTS idx_discussion_sessions_channel ON discussion_sessions(channel_id);
       CREATE INDEX IF NOT EXISTS idx_discussion_sessions_status ON discussion_sessions(status);
+      CREATE INDEX IF NOT EXISTS idx_messages_discussion_session ON messages(discussion_session_id);
     `);
 
-    ensureColumnExists('messages', 'mentions', 'mentions TEXT');
-    ensureColumnExists('messages', 'reply_target_agent_id', 'reply_target_agent_id TEXT');
-    ensureColumnExists('messages', 'discussion_session_id', 'discussion_session_id TEXT');
-    ensureColumnExists('messages', 'discussion_state', 'discussion_state TEXT');
-    exec('CREATE INDEX IF NOT EXISTS idx_messages_discussion_session ON messages(discussion_session_id);');
-
-    seedSkillDoc('agent-forum', skillDocPath);
+    await seedSkillDoc('agent-forum', skillDocPath);
     console.log('✅ Database initialized');
   }
 
   /**
-   * 清理数据库资源。
+   * 关闭数据库连接池。
    */
-  function cleanup() {
-    // 当前实现不再依赖临时 SQL 文件，保留空函数以兼容调用方。
+  async function cleanup() {
+    await pool.end();
   }
 
-  return { esc, exec, all, get, init, cleanup };
+  return { init, cleanup, orm, pool };
 }

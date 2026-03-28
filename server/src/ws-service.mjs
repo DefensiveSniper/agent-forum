@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import { URL } from 'url';
+import { eq, and } from 'drizzle-orm';
+import { agents, channels, channelMembers, subscriptions, adminUsers } from './schema.mjs';
 
 /**
  * 创建 WebSocket 服务。
@@ -12,6 +14,7 @@ import { URL } from 'url';
  * @returns {object}
  */
 export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited, tryParseJson }) {
+  const { orm } = db;
   const wsConnections = new Map();
   const wsAdminConnections = new Map();
   let heartbeatTimer = null;
@@ -86,15 +89,15 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
 
     if (buffer.length < offset + payloadLen) return null;
 
-    let payload = buffer.slice(offset, offset + payloadLen);
+    let pl = buffer.slice(offset, offset + payloadLen);
     if (masked && maskKey) {
-      payload = Buffer.from(payload);
-      for (let i = 0; i < payload.length; i += 1) {
-        payload[i] ^= maskKey[i % 4];
+      pl = Buffer.from(pl);
+      for (let i = 0; i < pl.length; i += 1) {
+        pl[i] ^= maskKey[i % 4];
       }
     }
 
-    return { opcode, payload: payload.toString('utf-8'), totalLen: offset + payloadLen };
+    return { opcode, payload: pl.toString('utf-8'), totalLen: offset + payloadLen };
   }
 
   /**
@@ -126,7 +129,6 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     for (const conns of wsConnections.values()) {
       conns.forEach((conn) => send(conn.socket, msg));
     }
-
     broadcastAdmins(msg);
   }
 
@@ -135,9 +137,10 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
    * @param {string} channelId
    * @param {object} msg
    */
-  function broadcastChannel(channelId, msg) {
+  async function broadcastChannel(channelId, msg) {
     const sentAgentIds = new Set();
-    const members = db.all(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(channelId)}`);
+    const members = await orm.select({ agent_id: channelMembers.agent_id })
+      .from(channelMembers).where(eq(channelMembers.channel_id, channelId));
 
     for (const member of members) {
       sentAgentIds.add(member.agent_id);
@@ -146,9 +149,10 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     }
 
     const eventType = msg.type || '';
-    const subscriptions = db.all(`SELECT agent_id, event_types FROM subscriptions WHERE channel_id = ${db.esc(channelId)}`);
+    const subs = await orm.select({ agent_id: subscriptions.agent_id, event_types: subscriptions.event_types })
+      .from(subscriptions).where(eq(subscriptions.channel_id, channelId));
 
-    for (const subscription of subscriptions) {
+    for (const subscription of subs) {
       if (sentAgentIds.has(subscription.agent_id)) continue;
 
       const eventTypes = tryParseJson(subscription.event_types);
@@ -184,30 +188,14 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
   function mapMessagingError(err) {
     const message = err?.message || 'Failed to send message';
 
-    if (message === 'replyTo message not found in this channel') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Discussion session not found') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Discussion session is not active') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Only the expected agent can reply in this discussion session') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Discussion replies must reply to the latest session message') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Final discussion turn cannot mention the next agent') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message === 'Linear discussion replies must mention exactly the next agent in order') {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
-    if (message.startsWith('Some mention agents are not channel members:')) {
-      return { code: 'INVALID_PAYLOAD', message };
-    }
+    if (message === 'replyTo message not found in this channel') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Discussion session not found') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Discussion session is not active') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Only the expected agent can reply in this discussion session') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Discussion replies must reply to the latest session message') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Final discussion turn cannot mention the next agent') return { code: 'INVALID_PAYLOAD', message };
+    if (message === 'Linear discussion replies must mention exactly the next agent in order') return { code: 'INVALID_PAYLOAD', message };
+    if (message.startsWith('Some mention agents are not channel members:')) return { code: 'INVALID_PAYLOAD', message };
 
     return { code: 'INTERNAL_ERROR', message };
   }
@@ -217,7 +205,7 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
    * @param {string} agentId
    * @param {import('net').Socket} socket
    */
-  function removeAgentConnection(agentId, socket) {
+  async function removeAgentConnection(agentId, socket) {
     const conns = wsConnections.get(agentId);
     if (!conns) return;
 
@@ -227,7 +215,7 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     const filtered = conns.filter((conn) => conn.socket !== socket);
     if (filtered.length === 0) {
       wsConnections.delete(agentId);
-      const agent = db.get(`SELECT name FROM agents WHERE id = ${db.esc(agentId)}`);
+      const [agent] = await orm.select({ name: agents.name }).from(agents).where(eq(agents.id, agentId));
       broadcastAll({
         type: 'agent.offline',
         payload: { agentId, agentName: agent?.name || '' },
@@ -257,138 +245,100 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     if (filtered.length === 0) wsAdminConnections.delete(adminId);
     else wsAdminConnections.set(adminId, filtered);
 
-    if (username) {
-      console.log(`🔌 WS Admin: ${username} disconnected`);
-    }
+    if (username) console.log(`🔌 WS Admin: ${username} disconnected`);
   }
 
   /**
    * 处理 subscribe 命令。
-   * @param {object} conn
-   * @param {object} agent
-   * @param {string} reqId
-   * @param {object} payload
-   * @returns {void}
    */
-  function handleWsSubscribe(conn, agent, reqId, payload) {
+  async function handleWsSubscribe(conn, agent, reqId, payload) {
     if (!payload || !payload.channelId) {
       return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId is required' });
     }
 
     const { channelId, eventTypes } = payload;
-    const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(channelId)}`);
-    if (!channel) {
-      return reply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
-    }
+    const [channel] = await orm.select({ id: channels.id, is_archived: channels.is_archived })
+      .from(channels).where(eq(channels.id, channelId));
+    if (!channel) return reply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
 
-    const member = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(channelId)} AND agent_id = ${db.esc(agent.id)}`);
-    if (!member) {
-      return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to subscribe' });
-    }
+    const [member] = await orm.select({ agent_id: channelMembers.agent_id }).from(channelMembers)
+      .where(and(eq(channelMembers.channel_id, channelId), eq(channelMembers.agent_id, agent.id)));
+    if (!member) return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to subscribe' });
 
-    const existing = db.get(`SELECT id FROM subscriptions WHERE agent_id = ${db.esc(agent.id)} AND channel_id = ${db.esc(channelId)}`);
+    const [existing] = await orm.select({ id: subscriptions.id }).from(subscriptions)
+      .where(and(eq(subscriptions.agent_id, agent.id), eq(subscriptions.channel_id, channelId)));
     const resolvedEventTypes = Array.isArray(eventTypes) && eventTypes.length > 0 ? eventTypes : ['*'];
-    const now = new Date().toISOString();
 
     if (existing) {
-      db.exec(`UPDATE subscriptions SET event_types = ${db.esc(JSON.stringify(resolvedEventTypes))} WHERE id = ${db.esc(existing.id)}`);
-      return reply(conn, reqId, true, {
-        subscriptionId: existing.id,
-        channelId,
-        eventTypes: resolvedEventTypes,
-        updated: true,
-      });
+      await orm.update(subscriptions).set({ event_types: JSON.stringify(resolvedEventTypes) }).where(eq(subscriptions.id, existing.id));
+      return reply(conn, reqId, true, { subscriptionId: existing.id, channelId, eventTypes: resolvedEventTypes, updated: true });
     }
 
     const id = crypto.randomUUID();
-    db.exec(`INSERT INTO subscriptions (id, agent_id, channel_id, event_types, created_at)
-      VALUES (${db.esc(id)}, ${db.esc(agent.id)}, ${db.esc(channelId)}, ${db.esc(JSON.stringify(resolvedEventTypes))}, ${db.esc(now)})`);
-
-    return reply(conn, reqId, true, {
-      subscriptionId: id,
-      channelId,
-      eventTypes: resolvedEventTypes,
-      createdAt: now,
+    const now = new Date().toISOString();
+    await orm.insert(subscriptions).values({
+      id, agent_id: agent.id, channel_id: channelId,
+      event_types: JSON.stringify(resolvedEventTypes), created_at: now,
     });
+
+    return reply(conn, reqId, true, { subscriptionId: id, channelId, eventTypes: resolvedEventTypes, createdAt: now });
   }
 
   /**
    * 处理 unsubscribe 命令。
-   * @param {object} conn
-   * @param {object} agent
-   * @param {string} reqId
-   * @param {object} payload
-   * @returns {void}
    */
-  function handleWsUnsubscribe(conn, agent, reqId, payload) {
+  async function handleWsUnsubscribe(conn, agent, reqId, payload) {
     if (!payload || (!payload.channelId && !payload.subscriptionId)) {
       return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId or subscriptionId is required' });
     }
 
     if (payload.subscriptionId) {
-      const subscription = db.get(`SELECT id FROM subscriptions WHERE id = ${db.esc(payload.subscriptionId)} AND agent_id = ${db.esc(agent.id)}`);
-      if (!subscription) {
-        return reply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Subscription not found' });
-      }
+      const [subscription] = await orm.select({ id: subscriptions.id }).from(subscriptions)
+        .where(and(eq(subscriptions.id, payload.subscriptionId), eq(subscriptions.agent_id, agent.id)));
+      if (!subscription) return reply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Subscription not found' });
 
-      db.exec(`DELETE FROM subscriptions WHERE id = ${db.esc(payload.subscriptionId)} AND agent_id = ${db.esc(agent.id)}`);
+      await orm.delete(subscriptions).where(and(eq(subscriptions.id, payload.subscriptionId), eq(subscriptions.agent_id, agent.id)));
       return reply(conn, reqId, true, { deleted: true });
     }
 
-    const subscription = db.get(`SELECT id FROM subscriptions WHERE channel_id = ${db.esc(payload.channelId)} AND agent_id = ${db.esc(agent.id)}`);
-    if (!subscription) {
-      return reply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'No subscription found for this channel' });
-    }
+    const [subscription] = await orm.select({ id: subscriptions.id }).from(subscriptions)
+      .where(and(eq(subscriptions.channel_id, payload.channelId), eq(subscriptions.agent_id, agent.id)));
+    if (!subscription) return reply(conn, reqId, false, { code: 'SUBSCRIPTION_NOT_FOUND', message: 'No subscription found for this channel' });
 
-    db.exec(`DELETE FROM subscriptions WHERE channel_id = ${db.esc(payload.channelId)} AND agent_id = ${db.esc(agent.id)}`);
+    await orm.delete(subscriptions).where(and(eq(subscriptions.channel_id, payload.channelId), eq(subscriptions.agent_id, agent.id)));
     return reply(conn, reqId, true, { deleted: true });
   }
 
   /**
    * 处理 message.send 命令。
-   * @param {object} conn
-   * @param {object} agent
-   * @param {string} reqId
-   * @param {object} payload
-   * @returns {void}
    */
-  function handleWsMessageSend(conn, agent, reqId, payload) {
+  async function handleWsMessageSend(conn, agent, reqId, payload) {
     if (!payload || !payload.channelId || !payload.content) {
       return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId and content are required' });
     }
 
     const { channelId, content, contentType, replyTo, mentionAgentIds, discussionSessionId } = payload;
-    const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(channelId)}`);
+    const [channel] = await orm.select({ id: channels.id, is_archived: channels.is_archived })
+      .from(channels).where(eq(channels.id, channelId));
 
-    if (!channel) {
-      return reply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
-    }
-    if (channel.is_archived) {
-      return reply(conn, reqId, false, { code: 'CHANNEL_ARCHIVED', message: 'Channel is archived, no new messages allowed' });
-    }
+    if (!channel) return reply(conn, reqId, false, { code: 'CHANNEL_NOT_FOUND', message: 'Channel not found' });
+    if (channel.is_archived) return reply(conn, reqId, false, { code: 'CHANNEL_ARCHIVED', message: 'Channel is archived, no new messages allowed' });
 
-    const member = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(channelId)} AND agent_id = ${db.esc(agent.id)}`);
-    if (!member) {
-      return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to send messages' });
-    }
+    const [member] = await orm.select({ agent_id: channelMembers.agent_id }).from(channelMembers)
+      .where(and(eq(channelMembers.channel_id, channelId), eq(channelMembers.agent_id, agent.id)));
+    if (!member) return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member to send messages' });
 
     if (isRateLimited(`ws:msg:${agent.id}`, 30, 60000)) {
       return reply(conn, reqId, false, { code: 'RATE_LIMITED', message: 'Message sending rate limit exceeded' });
     }
 
     try {
-      const { message } = messaging.createChannelMessage({
-        channelId,
-        senderId: agent.id,
-        senderName: agent.name,
-        content,
-        contentType,
-        replyTo,
-        mentionAgentIds,
-        discussionSessionId,
+      const { message } = await messaging.createChannelMessage({
+        channelId, senderId: agent.id, senderName: agent.name,
+        content, contentType, replyTo, mentionAgentIds, discussionSessionId,
       });
 
-      broadcastChannel(channelId, {
+      await broadcastChannel(channelId, {
         type: 'message.new',
         payload: { message, sender: { id: agent.id, name: agent.name } },
         timestamp: message.created_at,
@@ -403,12 +353,8 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
 
   /**
    * 处理 Agent 通过 WebSocket 发送的命令。
-   * @param {object} conn
-   * @param {object} agent
-   * @param {object} msg
-   * @returns {void}
    */
-  function handleAgentWsCommand(conn, agent, msg) {
+  async function handleAgentWsCommand(conn, agent, msg) {
     const { id: reqId, action, payload } = msg;
 
     if (!reqId || !action) {
@@ -420,21 +366,15 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     }
 
     switch (action) {
-      case 'subscribe':
-        return handleWsSubscribe(conn, agent, reqId, payload);
-      case 'unsubscribe':
-        return handleWsUnsubscribe(conn, agent, reqId, payload);
-      case 'message.send':
-        return handleWsMessageSend(conn, agent, reqId, payload);
-      default:
-        return reply(conn, reqId, false, { code: 'UNKNOWN_ACTION', message: `Unknown action: ${action}` });
+      case 'subscribe': return handleWsSubscribe(conn, agent, reqId, payload);
+      case 'unsubscribe': return handleWsUnsubscribe(conn, agent, reqId, payload);
+      case 'message.send': return handleWsMessageSend(conn, agent, reqId, payload);
+      default: return reply(conn, reqId, false, { code: 'UNKNOWN_ACTION', message: `Unknown action: ${action}` });
     }
   }
 
   /**
    * 完成 WebSocket 握手。
-   * @param {import('http').IncomingMessage} req
-   * @param {import('net').Socket} socket
    */
   function completeHandshake(req, socket) {
     const key = req.headers['sec-websocket-key'];
@@ -449,31 +389,16 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
 
   /**
    * 处理管理员 WebSocket 升级。
-   * @param {import('http').IncomingMessage} req
-   * @param {import('net').Socket} socket
-   * @param {URL} url
    */
-  function handleAdminUpgrade(req, socket, url) {
+  async function handleAdminUpgrade(req, socket, url) {
     const token = url.searchParams.get('token');
-    if (!token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    if (!token) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
 
-    const payload = verifyJwt(token);
-    if (!payload) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    const jwtPayload = verifyJwt(token);
+    if (!jwtPayload) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
 
-    const admin = db.get(`SELECT * FROM admin_users WHERE id = ${db.esc(payload.id)}`);
-    if (!admin) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    const [admin] = await orm.select().from(adminUsers).where(eq(adminUsers.id, jwtPayload.id));
+    if (!admin) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
 
     completeHandshake(req, socket);
 
@@ -492,14 +417,8 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
         if (!frame) break;
         buffer = buffer.slice(frame.totalLen);
 
-        if (frame.opcode === 0x08) {
-          socket.end();
-          return;
-        }
-        if (frame.opcode === 0x0a) {
-          conn.alive = true;
-          continue;
-        }
+        if (frame.opcode === 0x08) { socket.end(); return; }
+        if (frame.opcode === 0x0a) { conn.alive = true; continue; }
         if (frame.opcode === 0x01) {
           try {
             const msg = JSON.parse(frame.payload);
@@ -516,45 +435,25 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
 
   /**
    * 处理 WebSocket 升级请求。
-   * @param {import('http').IncomingMessage} req
-   * @param {import('net').Socket} socket
    */
-  function handleUpgrade(req, socket) {
+  async function handleUpgrade(req, socket) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const pathname = url.pathname;
 
-    if (pathname === '/ws/admin') {
-      handleAdminUpgrade(req, socket, url);
-      return;
-    }
+    if (pathname === '/ws/admin') { await handleAdminUpgrade(req, socket, url); return; }
 
     const apiKey = url.searchParams.get('apiKey');
-    if (!apiKey) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    if (!apiKey) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
 
     const apiKeyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const agent = db.get(`SELECT id, name, status FROM agents WHERE api_key_hash = ${db.esc(apiKeyHash)}`);
+    const [agent] = await orm.select({ id: agents.id, name: agents.name, status: agents.status })
+      .from(agents).where(eq(agents.api_key_hash, apiKeyHash));
 
-    if (!agent) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    if (agent.status === 'suspended') {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    if (!agent) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+    if (agent.status === 'suspended') { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
 
     const existingConnections = wsConnections.get(agent.id) || [];
-    if (existingConnections.length >= 5) {
-      socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    if (existingConnections.length >= 5) { socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n'); socket.destroy(); return; }
 
     completeHandshake(req, socket);
 
@@ -579,85 +478,51 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
         if (!frame) break;
         buffer = buffer.slice(frame.totalLen);
 
-        if (frame.opcode === 0x08) {
-          socket.end();
-          return;
-        }
-        if (frame.opcode === 0x0a) {
-          conn.alive = true;
-          continue;
-        }
+        if (frame.opcode === 0x08) { socket.end(); return; }
+        if (frame.opcode === 0x0a) { conn.alive = true; continue; }
         if (frame.opcode === 0x01) {
           try {
             const msg = JSON.parse(frame.payload);
-            if (msg.type === 'pong') {
-              conn.alive = true;
-              continue;
+            if (msg.type === 'pong') { conn.alive = true; continue; }
+            if (msg.action) {
+              handleAgentWsCommand(conn, agent, msg).catch((err) => {
+                console.error('WS command error:', err);
+              });
             }
-            if (msg.action) handleAgentWsCommand(conn, agent, msg);
           } catch {}
         }
       }
     });
 
-    socket.on('close', () => removeAgentConnection(agent.id, socket));
-    socket.on('error', () => removeAgentConnection(agent.id, socket));
+    socket.on('close', () => removeAgentConnection(agent.id, socket).catch(() => {}));
+    socket.on('error', () => removeAgentConnection(agent.id, socket).catch(() => {}));
   }
 
   /**
    * 断开指定 Agent 的全部连接。
-   * @param {string} agentId
-   * @param {string} reason
    */
   function disconnectAgent(agentId, reason) {
     const conns = wsConnections.get(agentId);
     if (!conns) return;
 
     conns.forEach((conn) => {
-      send(conn.socket, {
-        type: 'agent.suspended',
-        payload: { reason },
-        timestamp: new Date().toISOString(),
-      });
-
-      try {
-        conn.socket.end();
-      } catch {}
+      send(conn.socket, { type: 'agent.suspended', payload: { reason }, timestamp: new Date().toISOString() });
+      try { conn.socket.end(); } catch {}
     });
 
     wsConnections.delete(agentId);
   }
 
-  /**
-   * 判断 Agent 是否在线。
-   * @param {string} agentId
-   * @returns {boolean}
-   */
-  function isAgentOnline(agentId) {
-    return wsConnections.has(agentId);
-  }
+  function isAgentOnline(agentId) { return wsConnections.has(agentId); }
 
-  /**
-   * 获取当前连接统计信息。
-   * @returns {object}
-   */
   function getConnectionStats() {
     let totalConnections = 0;
     let adminConnections = 0;
-
     for (const conns of wsConnections.values()) totalConnections += conns.length;
     for (const conns of wsAdminConnections.values()) adminConnections += conns.length;
-
-    return {
-      onlineAgents: wsConnections.size,
-      totalConnections,
-      adminConnections,
-    };
+    return { onlineAgents: wsConnections.size, totalConnections, adminConnections };
   }
 
-  /**
-   * 启动心跳检测定时器。
-   */
   function startHeartbeat() {
     if (heartbeatTimer) return;
 
@@ -667,13 +532,10 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
       for (const [agentId, conns] of wsConnections) {
         for (const conn of [...conns]) {
           if (!conn.alive) {
-            try {
-              conn.socket.end();
-            } catch {}
-            removeAgentConnection(agentId, conn.socket);
+            try { conn.socket.end(); } catch {}
+            removeAgentConnection(agentId, conn.socket).catch(() => {});
             continue;
           }
-
           conn.alive = false;
           send(conn.socket, pingMsg);
         }
@@ -682,13 +544,10 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
       for (const [adminId, conns] of wsAdminConnections) {
         for (const conn of [...conns]) {
           if (!conn.alive) {
-            try {
-              conn.socket.end();
-            } catch {}
+            try { conn.socket.end(); } catch {}
             removeAdminConnection(adminId, conn.socket);
             continue;
           }
-
           conn.alive = false;
           send(conn.socket, pingMsg);
         }
@@ -698,9 +557,6 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
   }
 
-  /**
-   * 停止心跳检测定时器。
-   */
   function stopHeartbeat() {
     if (!heartbeatTimer) return;
     clearInterval(heartbeatTimer);
@@ -708,14 +564,7 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
   }
 
   return {
-    handleUpgrade,
-    broadcastChannel,
-    broadcastAll,
-    broadcastAdmins,
-    disconnectAgent,
-    isAgentOnline,
-    getConnectionStats,
-    startHeartbeat,
-    stopHeartbeat,
+    handleUpgrade, broadcastChannel, broadcastAll, broadcastAdmins,
+    disconnectAgent, isAgentOnline, getConnectionStats, startHeartbeat, stopHeartbeat,
   };
 }

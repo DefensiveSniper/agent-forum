@@ -1,3 +1,5 @@
+import { eq } from 'drizzle-orm';
+import { skillDocs } from '../schema.mjs';
 import { createSkillBundle } from '../skill-bundle.mjs';
 
 /**
@@ -8,6 +10,7 @@ export function registerDocsRoutes(context) {
   const { router, auth, db, sendJson, skillsRoot } = context;
   const { addRoute, routes } = router;
   const { authAgent, authAdmin } = auth;
+  const { orm } = db;
 
   /** GET /api/v1/docs/routes - 获取所有 API 路由文档（含 WebSocket 接入指南） */
   addRoute('GET', '/api/v1/docs/routes', (req, res) => {
@@ -93,8 +96,8 @@ export function registerDocsRoutes(context) {
   });
 
   /** GET /api/v1/docs/skill/:id - 获取指定 Skill 文档 */
-  addRoute('GET', '/api/v1/docs/skill/:id', (req, res) => {
-    const doc = db.get(`SELECT * FROM skill_docs WHERE id = ${db.esc(req.params.id)}`);
+  addRoute('GET', '/api/v1/docs/skill/:id', async (req, res) => {
+    const [doc] = await orm.select().from(skillDocs).where(eq(skillDocs.id, req.params.id));
     if (!doc) return sendJson(res, 404, { error: 'Skill 文档不存在' });
 
     sendJson(res, 200, {
@@ -117,20 +120,19 @@ export function registerDocsRoutes(context) {
   });
 
   /** PUT /api/v1/docs/skill/:id - 更新 Skill 文档 */
-  addRoute('PUT', '/api/v1/docs/skill/:id', authAdmin, (req, res) => {
+  addRoute('PUT', '/api/v1/docs/skill/:id', authAdmin, async (req, res) => {
     const { content } = req.body || {};
     if (!content || typeof content !== 'string') {
       return sendJson(res, 400, { error: 'content 为必填字段，类型为 string' });
     }
 
     const now = new Date().toISOString();
-    const existing = db.get(`SELECT id FROM skill_docs WHERE id = ${db.esc(req.params.id)}`);
+    const [existing] = await orm.select({ id: skillDocs.id }).from(skillDocs).where(eq(skillDocs.id, req.params.id));
 
     if (existing) {
-      db.exec(`UPDATE skill_docs SET content = ${db.esc(content)}, updated_at = ${db.esc(now)}, updated_by = ${db.esc(req.admin.username)} WHERE id = ${db.esc(req.params.id)}`);
+      await orm.update(skillDocs).set({ content, updated_at: now, updated_by: req.admin.username }).where(eq(skillDocs.id, req.params.id));
     } else {
-      db.exec(`INSERT INTO skill_docs (id, content, updated_at, updated_by)
-        VALUES (${db.esc(req.params.id)}, ${db.esc(content)}, ${db.esc(now)}, ${db.esc(req.admin.username)})`);
+      await orm.insert(skillDocs).values({ id: req.params.id, content, updated_at: now, updated_by: req.admin.username });
     }
 
     sendJson(res, 200, {

@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { eq } from 'drizzle-orm';
+import { agents, adminUsers } from './schema.mjs';
 
 /**
  * 创建认证中间件集合。
@@ -9,16 +11,16 @@ import crypto from 'crypto';
  * @returns {object}
  */
 export function createAuth({ db, sendJson, verifyJwt }) {
-  const { get, exec, esc } = db;
+  const { orm } = db;
 
   /**
    * Agent API Key 认证中间件。
    * @param {object} req
    * @param {object} res
    * @param {Function} next
-   * @returns {Promise<void>|void}
+   * @returns {Promise<void>}
    */
-  function authAgent(req, res, next) {
+  async function authAgent(req, res, next) {
     const auth = req.headers.authorization;
     if (!auth || !auth.startsWith('Bearer ')) {
       return sendJson(res, 401, { error: 'Missing Authorization header' });
@@ -26,7 +28,7 @@ export function createAuth({ db, sendJson, verifyJwt }) {
 
     const apiKey = auth.substring(7);
     const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const agent = get(`SELECT * FROM agents WHERE api_key_hash = ${esc(hash)}`);
+    const [agent] = await orm.select().from(agents).where(eq(agents.api_key_hash, hash));
 
     if (!agent) {
       return sendJson(res, 401, { error: 'Invalid API Key' });
@@ -35,7 +37,7 @@ export function createAuth({ db, sendJson, verifyJwt }) {
       return sendJson(res, 403, { error: 'Agent is suspended' });
     }
 
-    exec(`UPDATE agents SET last_seen_at = ${esc(new Date().toISOString())} WHERE id = ${esc(agent.id)}`);
+    await orm.update(agents).set({ last_seen_at: new Date().toISOString() }).where(eq(agents.id, agent.id));
     req.agent = agent;
     return next();
   }
@@ -45,9 +47,9 @@ export function createAuth({ db, sendJson, verifyJwt }) {
    * @param {object} req
    * @param {object} res
    * @param {Function} next
-   * @returns {Promise<void>|void}
+   * @returns {Promise<void>}
    */
-  function authAdmin(req, res, next) {
+  async function authAdmin(req, res, next) {
     const auth = req.headers.authorization;
     if (!auth || !auth.startsWith('Bearer ')) {
       return sendJson(res, 401, { error: 'Missing Authorization header' });
@@ -58,7 +60,7 @@ export function createAuth({ db, sendJson, verifyJwt }) {
       return sendJson(res, 401, { error: 'Invalid or expired token' });
     }
 
-    const admin = get(`SELECT * FROM admin_users WHERE id = ${esc(payload.id)}`);
+    const [admin] = await orm.select().from(adminUsers).where(eq(adminUsers.id, payload.id));
     if (!admin) {
       return sendJson(res, 401, { error: 'Admin not found' });
     }

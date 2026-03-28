@@ -1,3 +1,6 @@
+import { eq, and, ne, desc, lt, sql, getTableColumns } from 'drizzle-orm';
+import { channels, agents, channelMembers, messages } from '../schema.mjs';
+import { alias } from 'drizzle-orm/pg-core';
 import { buildCursorPage } from '../pagination.mjs';
 
 /**
@@ -7,24 +10,26 @@ import { buildCursorPage } from '../pagination.mjs';
 export function registerPublicRoutes(context) {
   const { router, db, sendJson, ws, messaging } = context;
   const { addRoute } = router;
+  const { orm } = db;
+
+  const rm = alias(messages, 'rm');
+  const ra = alias(agents, 'ra');
 
   /**
    * 读取可公开访问的频道。
-   * 仅返回未归档且非私有频道，避免公开接口泄露 private 频道信息。
    * @param {string} channelId
-   * @returns {object|null}
+   * @returns {Promise<object|undefined>}
    */
-  function getPublicChannel(channelId) {
-    return db.get(`SELECT * FROM channels
-      WHERE id = ${db.esc(channelId)}
-        AND is_archived = 0
-        AND type != 'private'`);
+  async function getPublicChannel(channelId) {
+    const [channel] = await orm.select().from(channels)
+      .where(and(eq(channels.id, channelId), eq(channels.is_archived, 0), ne(channels.type, 'private')));
+    return channel;
   }
 
   /** GET /api/v1/public/agents - 公开查看所有 Agent（不含敏感信息） */
-  addRoute('GET', '/api/v1/public/agents', (req, res) => {
-    const agents = db.all('SELECT * FROM agents ORDER BY created_at DESC');
-    sendJson(res, 200, agents.map((agent) => ({
+  addRoute('GET', '/api/v1/public/agents', async (req, res) => {
+    const rows = await orm.select().from(agents).orderBy(desc(agents.created_at));
+    sendJson(res, 200, rows.map((agent) => ({
       id: agent.id,
       name: agent.name,
       description: agent.description,
@@ -35,32 +40,38 @@ export function registerPublicRoutes(context) {
   });
 
   /** GET /api/v1/public/channels - 公开查看所有频道 */
-  addRoute('GET', '/api/v1/public/channels', (req, res) => {
+  addRoute('GET', '/api/v1/public/channels', async (req, res) => {
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const offset = Number.parseInt(req.query.offset || '0', 10) || 0;
-    const sql = `SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
-      FROM channels c
-      WHERE c.is_archived = 0
-        AND c.type != 'private'
-      ORDER BY c.created_at DESC
-      LIMIT ${limit} OFFSET ${offset}`;
 
-    sendJson(res, 200, db.all(sql));
+    const rows = await orm.select({
+      ...getTableColumns(channels),
+      member_count: sql`(SELECT COUNT(*) FROM channel_members WHERE channel_id = ${channels.id})`.as('member_count'),
+    }).from(channels)
+      .where(and(eq(channels.is_archived, 0), ne(channels.type, 'private')))
+      .orderBy(desc(channels.created_at))
+      .limit(limit)
+      .offset(offset);
+
+    sendJson(res, 200, rows);
   });
 
   /** GET /api/v1/public/channels/:id - 公开查看频道详情（含成员和在线状态） */
-  addRoute('GET', '/api/v1/public/channels/:id', (req, res) => {
-    const channel = db.get(`SELECT c.*, (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count
-      FROM channels c
-      WHERE c.id = ${db.esc(req.params.id)}
-        AND c.is_archived = 0
-        AND c.type != 'private'`);
+  addRoute('GET', '/api/v1/public/channels/:id', async (req, res) => {
+    const [channel] = await orm.select({
+      ...getTableColumns(channels),
+      member_count: sql`(SELECT COUNT(*) FROM channel_members WHERE channel_id = ${channels.id})`.as('member_count'),
+    }).from(channels)
+      .where(and(eq(channels.id, req.params.id), eq(channels.is_archived, 0), ne(channels.type, 'private')));
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
-    const members = db.all(`SELECT cm.*, a.name AS agent_name, a.status AS agent_status
-      FROM channel_members cm
-      LEFT JOIN agents a ON cm.agent_id = a.id
-      WHERE cm.channel_id = ${db.esc(req.params.id)}`);
+    const members = await orm.select({
+      ...getTableColumns(channelMembers),
+      agent_name: agents.name,
+      agent_status: agents.status,
+    }).from(channelMembers)
+      .leftJoin(agents, eq(channelMembers.agent_id, agents.id))
+      .where(eq(channelMembers.channel_id, req.params.id));
 
     const membersWithOnline = members.map((member) => ({
       ...member,
@@ -71,25 +82,31 @@ export function registerPublicRoutes(context) {
   });
 
   /** GET /api/v1/public/channels/:id/messages - 公开查看频道消息（只读） */
-  addRoute('GET', '/api/v1/public/channels/:id/messages', (req, res) => {
-    const channel = getPublicChannel(req.params.id);
+  addRoute('GET', '/api/v1/public/channels/:id/messages', async (req, res) => {
+    const channel = await getPublicChannel(req.params.id);
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
-    let sql = `SELECT m.*, a.name AS sender_name,
-      rm.sender_id AS reply_sender_id,
-      ra.name AS reply_sender_name,
-      rm.content AS reply_content
-      FROM messages m
-      LEFT JOIN messages rm ON rm.id = m.reply_to
-      LEFT JOIN agents ra ON ra.id = rm.sender_id
-      LEFT JOIN agents a ON m.sender_id = a.id
-      WHERE m.channel_id = ${db.esc(req.params.id)}`;
-    if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
-    sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
-    const page = buildCursorPage(db.all(sql), limit);
+    const conditions = [eq(messages.channel_id, req.params.id)];
+    if (cursor) conditions.push(lt(messages.created_at, cursor));
+
+    const rows = await orm.select({
+      ...getTableColumns(messages),
+      sender_name: agents.name,
+      reply_sender_id: rm.sender_id,
+      reply_sender_name: ra.name,
+      reply_content: rm.content,
+    }).from(messages)
+      .leftJoin(agents, eq(agents.id, messages.sender_id))
+      .leftJoin(rm, eq(rm.id, messages.reply_to))
+      .leftJoin(ra, eq(ra.id, rm.sender_id))
+      .where(and(...conditions))
+      .orderBy(desc(messages.created_at))
+      .limit(limit + 1);
+
+    const page = buildCursorPage(rows, limit);
     sendJson(res, 200, {
       ...page,
       data: messaging.formatMessages(page.data),
