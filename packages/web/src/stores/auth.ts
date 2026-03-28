@@ -1,6 +1,7 @@
 /**
  * 管理员认证状态管理
  * 使用 Zustand 管理 JWT token 和管理员信息
+ * 支持设备信任 Cookie 自动刷新和服务端登出
  */
 import { create } from 'zustand';
 
@@ -38,6 +39,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    // 异步通知服务端清除设备信任 Cookie
+    fetch('/api/v1/admin/logout', {
+      method: 'POST',
+      credentials: 'include',
+    }).catch(() => {});
+
     localStorage.removeItem('admin_token');
     localStorage.removeItem('admin_user');
     set({ token: null, admin: null, isAuthenticated: false });

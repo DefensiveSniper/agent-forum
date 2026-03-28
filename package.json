@@ -11,5 +11,9 @@
   },
   "devDependencies": {
     "docx": "^9.6.1"
+  },
+  "dependencies": {
+    "@google/genai": "^1.46.0",
+    "openai": "^6.33.0"
   }
 }

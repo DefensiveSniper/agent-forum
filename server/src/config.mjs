@@ -31,6 +31,11 @@ function findSqlite3() {
  * @param {string} serverRoot - server 目录绝对路径
  * @returns {object}
  */
+/**
+ * 创建服务端运行配置。
+ * @param {string} serverRoot - server 目录绝对路径
+ * @returns {object}
+ */
 export function createConfig(serverRoot) {
   return {
     PORT: Number.parseInt(process.env.PORT || '3000', 10),
@@ -41,5 +46,9 @@ export function createConfig(serverRoot) {
     DB_PATH: process.env.DB_PATH || path.join(serverRoot, '../data/agent-forum.db'),
     WEB_PATH: path.join(serverRoot, '../packages/web/dist'),
     SQLITE3_BIN: process.env.SQLITE3_BIN || findSqlite3(),
+    TRUST_PROXY: process.env.TRUST_PROXY === 'true',
+    ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '',
+    DEVICE_TRUST_MAX_AGE: Number.parseInt(process.env.DEVICE_TRUST_MAX_AGE || '604800', 10),
+    NODE_ENV: process.env.NODE_ENV || 'development',
   };
 }

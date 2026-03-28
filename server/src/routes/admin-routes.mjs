@@ -1,12 +1,13 @@
 import crypto from 'crypto';
 import { buildCursorPage } from '../pagination.mjs';
+import { parseCookies } from '../http-utils.mjs';
 
 /**
  * 注册管理员相关路由。
  * @param {object} context
  */
 export function registerAdminRoutes(context) {
-  const { router, auth, db, sendJson, formatAgent, ws, security, messaging } = context;
+  const { config, router, auth, db, sendJson, formatAgent, ws, security, messaging, monitoring, captcha, rateLimiter } = context;
   const { addRoute } = router;
   const { authAdmin } = auth;
   const VALID_CHANNEL_TYPES = new Set(['public', 'private', 'broadcast']);
@@ -155,19 +156,160 @@ export function registerAdminRoutes(context) {
     };
   }
 
-  /** POST /api/v1/admin/login - 管理员登录 */
+  /**
+   * 基于最近一分钟的成功率和响应时延计算系统健康度。
+   * 成功率决定基础分，高延迟会进一步扣分。
+   * @param {object} snapshot
+   * @param {number} snapshot.totalRequestsLastMinute
+   * @param {number} snapshot.errorRate
+   * @param {number} snapshot.avgResponseMs
+   * @returns {{ score: number, level: string, label: string, summary: string }}
+   */
+  function buildHealthStatus(snapshot) {
+    if (snapshot.totalRequestsLastMinute === 0) {
+      return {
+        score: 100,
+        level: 'stable',
+        label: '空闲',
+        summary: '最近 1 分钟没有 API 请求，系统处于空闲状态。',
+      };
+    }
+
+    const successRateScore = (1 - snapshot.errorRate) * 100;
+    const latencyPenalty = snapshot.avgResponseMs <= 300
+      ? 0
+      : Math.min(25, (snapshot.avgResponseMs - 300) / 28);
+    const score = Math.max(0, Math.round(successRateScore - latencyPenalty));
+
+    if (score >= 90) {
+      return {
+        score,
+        level: 'stable',
+        label: '稳定',
+        summary: '最近 1 分钟请求成功率和响应时延均在健康范围内。',
+      };
+    }
+
+    if (score >= 70) {
+      return {
+        score,
+        level: 'watch',
+        label: '关注',
+        summary: '最近 1 分钟存在少量错误或时延抬升，建议继续观察。',
+      };
+    }
+
+    return {
+      score,
+      level: 'critical',
+      label: '告警',
+      summary: '最近 1 分钟错误率或响应时延偏高，需要立即排查。',
+    };
+  }
+
+  /**
+   * 构建设备信任 Cookie 的 Set-Cookie 头值。
+   * @param {string} deviceToken
+   * @param {number} maxAge
+   * @returns {string}
+   */
+  function buildDeviceCookie(deviceToken, maxAge) {
+    const parts = [`device_trust=${deviceToken}`, 'HttpOnly', 'SameSite=Strict', 'Path=/api/v1/admin', `Max-Age=${maxAge}`];
+    if (config.NODE_ENV !== 'development') parts.push('Secure');
+    return parts.join('; ');
+  }
+
+  /**
+   * 构建清除设备信任 Cookie 的 Set-Cookie 头值。
+   * @returns {string}
+   */
+  function buildClearDeviceCookie() {
+    const parts = ['device_trust=', 'HttpOnly', 'SameSite=Strict', 'Path=/api/v1/admin', 'Max-Age=0'];
+    if (config.NODE_ENV !== 'development') parts.push('Secure');
+    return parts.join('; ');
+  }
+
+  /**
+   * 签发设备信任 Token 并写入数据库。
+   * @param {object} options
+   * @param {string} options.adminId
+   * @param {string} options.userAgent
+   * @param {string} options.ip
+   * @returns {string} 原始 deviceToken（用于 cookie）
+   */
+  function issueDeviceToken({ adminId, userAgent, ip }) {
+    const deviceToken = crypto.randomBytes(48).toString('hex');
+    const hash = security.hashDeviceToken(deviceToken);
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + config.DEVICE_TRUST_MAX_AGE * 1000).toISOString();
+
+    db.exec(`INSERT INTO admin_devices (id, admin_id, device_token_hash, user_agent, ip_address, created_at, last_used_at, expires_at)
+      VALUES (${db.esc(crypto.randomUUID())}, ${db.esc(adminId)}, ${db.esc(hash)}, ${db.esc(userAgent || null)}, ${db.esc(ip || null)}, ${db.esc(now)}, ${db.esc(now)}, ${db.esc(expiresAt)})`);
+
+    return deviceToken;
+  }
+
+  /** GET /api/v1/admin/captcha - 获取图形验证码 */
+  addRoute('GET', '/api/v1/admin/captcha', (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    if (rateLimiter.isRateLimited(`captcha:${ip}`, 20, 60000)) {
+      return sendJson(res, 429, { error: 'Too many captcha requests' });
+    }
+    sendJson(res, 200, captcha.generateCaptcha());
+  });
+
+  /** POST /api/v1/admin/login - 管理员登录（含验证码校验和失败锁定） */
   addRoute('POST', '/api/v1/admin/login', (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, captchaId, captchaText } = req.body;
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+
     if (!username || !password) {
       return sendJson(res, 400, { error: 'username and password required' });
     }
-
-    const admin = db.get(`SELECT * FROM admin_users WHERE username = ${db.esc(username)}`);
-    if (!admin || !security.verifyPassword(password, admin.password_hash)) {
-      return sendJson(res, 401, { error: 'Invalid credentials' });
+    if (!captchaId || !captchaText) {
+      return sendJson(res, 400, { error: 'captchaId and captchaText required' });
     }
 
+    // 检查是否被锁定
+    const lockStatus = captcha.isLocked(ip, username);
+    if (lockStatus.locked) {
+      return sendJson(res, 423, {
+        error: '登录尝试次数过多，账户已暂时锁定',
+        lockedUntil: lockStatus.lockedUntil,
+        remainingSeconds: lockStatus.remainingSeconds,
+      });
+    }
+
+    // 验证验证码
+    const captchaResult = captcha.verifyCaptcha(captchaId, captchaText);
+    if (!captchaResult.valid) {
+      return sendJson(res, 400, { error: captchaResult.reason });
+    }
+
+    // 验证用户名密码
+    const admin = db.get(`SELECT * FROM admin_users WHERE username = ${db.esc(username)}`);
+    if (!admin || !security.verifyPassword(password, admin.password_hash)) {
+      captcha.recordFailure(ip, username);
+      const newLockStatus = captcha.isLocked(ip, username);
+      return sendJson(res, 401, {
+        error: 'Invalid credentials',
+        ...(newLockStatus.locked ? {
+          locked: true,
+          lockedUntil: newLockStatus.lockedUntil,
+          remainingSeconds: newLockStatus.remainingSeconds,
+        } : {}),
+      });
+    }
+
+    // 登录成功：清除失败计数，签发 JWT 和设备信任 Token
+    captcha.clearFailure(ip, username);
     const token = security.signJwt({ id: admin.id, username: admin.username, role: admin.role });
+    const deviceToken = issueDeviceToken({
+      adminId: admin.id,
+      userAgent: req.headers['user-agent'],
+      ip,
+    });
+
     console.log(`🔑 Admin login: ${username}`);
     sendJson(res, 200, {
       token,
@@ -177,6 +319,113 @@ export function registerAdminRoutes(context) {
         role: admin.role,
         createdAt: admin.created_at,
       },
+    }, {
+      'Set-Cookie': buildDeviceCookie(deviceToken, config.DEVICE_TRUST_MAX_AGE),
+    });
+  });
+
+  /** POST /api/v1/admin/refresh - 通过设备信任 Cookie 刷新 JWT（7天免登录） */
+  addRoute('POST', '/api/v1/admin/refresh', (req, res) => {
+    const cookies = parseCookies(req);
+    const deviceToken = cookies.device_trust;
+
+    if (!deviceToken) {
+      return sendJson(res, 401, { error: 'No device trust token' });
+    }
+
+    const hash = security.hashDeviceToken(deviceToken);
+    const device = db.get(`SELECT * FROM admin_devices WHERE device_token_hash = ${db.esc(hash)}`);
+
+    if (!device) {
+      return sendJson(res, 401, { error: 'Invalid device token' }, {
+        'Set-Cookie': buildClearDeviceCookie(),
+      });
+    }
+
+    // 检查是否过期
+    if (new Date(device.expires_at) <= new Date()) {
+      db.exec(`DELETE FROM admin_devices WHERE id = ${db.esc(device.id)}`);
+      return sendJson(res, 401, { error: 'Device token expired' }, {
+        'Set-Cookie': buildClearDeviceCookie(),
+      });
+    }
+
+    // 查找关联的管理员
+    const admin = db.get(`SELECT * FROM admin_users WHERE id = ${db.esc(device.admin_id)}`);
+    if (!admin) {
+      db.exec(`DELETE FROM admin_devices WHERE id = ${db.esc(device.id)}`);
+      return sendJson(res, 401, { error: 'Admin not found' }, {
+        'Set-Cookie': buildClearDeviceCookie(),
+      });
+    }
+
+    // 更新最后使用时间
+    db.exec(`UPDATE admin_devices SET last_used_at = ${db.esc(new Date().toISOString())} WHERE id = ${db.esc(device.id)}`);
+
+    // 如果距过期不足 2 天，滑动续期
+    const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+    const extraHeaders = {};
+    if (new Date(device.expires_at).getTime() - Date.now() < twoDaysMs) {
+      const newExpiresAt = new Date(Date.now() + config.DEVICE_TRUST_MAX_AGE * 1000).toISOString();
+      db.exec(`UPDATE admin_devices SET expires_at = ${db.esc(newExpiresAt)} WHERE id = ${db.esc(device.id)}`);
+      extraHeaders['Set-Cookie'] = buildDeviceCookie(deviceToken, config.DEVICE_TRUST_MAX_AGE);
+    }
+
+    const token = security.signJwt({ id: admin.id, username: admin.username, role: admin.role });
+    console.log(`🔄 Admin token refreshed via device trust: ${admin.username}`);
+    sendJson(res, 200, {
+      token,
+      admin: {
+        id: admin.id,
+        username: admin.username,
+        role: admin.role,
+        createdAt: admin.created_at,
+      },
+    }, extraHeaders);
+  });
+
+  /** POST /api/v1/admin/logout - 管理员登出（清除设备信任） */
+  addRoute('POST', '/api/v1/admin/logout', (req, res) => {
+    const cookies = parseCookies(req);
+    const deviceToken = cookies.device_trust;
+
+    if (deviceToken) {
+      const hash = security.hashDeviceToken(deviceToken);
+      db.exec(`DELETE FROM admin_devices WHERE device_token_hash = ${db.esc(hash)}`);
+    }
+
+    sendJson(res, 200, { message: 'Logged out' }, {
+      'Set-Cookie': buildClearDeviceCookie(),
+    });
+  });
+
+  /** GET /api/v1/admin/monitoring - 获取管理员监控面板数据 */
+  addRoute('GET', '/api/v1/admin/monitoring', authAdmin, (req, res) => {
+    const traffic = monitoring.getSnapshot();
+    const channelCount = db.get('SELECT COUNT(*) AS cnt FROM channels WHERE is_archived = 0');
+    const agentCount = db.get('SELECT COUNT(*) AS cnt FROM agents');
+    const health = buildHealthStatus(traffic);
+
+    sendJson(res, 200, {
+      generatedAt: traffic.generatedAt,
+      startedAt: traffic.startedAt,
+      health,
+      overview: {
+        uptimeMs: traffic.uptimeMs,
+        totalAgents: agentCount?.cnt || 0,
+        activeChannels: channelCount?.cnt || 0,
+        onlineAgents: traffic.connections.onlineAgents,
+        totalConnections: traffic.connections.totalConnections,
+        adminConnections: traffic.connections.adminConnections,
+        qps: traffic.currentQps,
+        peakQps: traffic.peakQps,
+        requestsLastMinute: traffic.totalRequestsLastMinute,
+        errorsLastMinute: traffic.totalErrorsLastMinute,
+        avgResponseMs: traffic.avgResponseMs,
+        errorRate: traffic.errorRate,
+        errorRatePercent: Number((traffic.errorRate * 100).toFixed(1)),
+      },
+      history: traffic.history,
     });
   });
 

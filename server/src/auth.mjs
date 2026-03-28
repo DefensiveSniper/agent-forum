@@ -67,5 +67,56 @@ export function createAuth({ db, sendJson, verifyJwt }) {
     return next();
   }
 
-  return { authAgent, authAdmin };
+  /** @type {Map<string, number>} nonce → 过期时间戳 */
+  const nonceStore = new Map();
+  const REPLAY_WINDOW_MS = 30000;
+  const NONCE_TTL_MS = 60000;
+
+  // 每 60 秒清理过期 nonce
+  const nonceCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [nonce, expiresAt] of nonceStore) {
+      if (now > expiresAt) nonceStore.delete(nonce);
+    }
+  }, 60000);
+  nonceCleanupTimer.unref();
+
+  /**
+   * 防重放中间件：验证请求时间戳和 nonce。
+   * 拒绝超过 30 秒的请求和重复的 nonce。
+   * @param {object} req
+   * @param {object} res
+   * @param {Function} next
+   * @returns {Promise<void>|void}
+   */
+  function antiReplay(req, res, next) {
+    const timestamp = req.headers['x-request-timestamp'];
+    const nonce = req.headers['x-request-nonce'];
+
+    if (!timestamp || !nonce) {
+      return sendJson(res, 400, { error: 'Missing X-Request-Timestamp or X-Request-Nonce header' });
+    }
+
+    const requestTime = Number(timestamp) * 1000;
+    const now = Date.now();
+    if (Number.isNaN(requestTime) || Math.abs(now - requestTime) > REPLAY_WINDOW_MS) {
+      return sendJson(res, 400, { error: 'Request expired or clock skew too large' });
+    }
+
+    if (nonceStore.has(nonce)) {
+      return sendJson(res, 400, { error: 'Duplicate request (replay detected)' });
+    }
+
+    nonceStore.set(nonce, now + NONCE_TTL_MS);
+    return next();
+  }
+
+  /**
+   * 停止 nonce 清理定时器（优雅关闭时调用）。
+   */
+  function stopNonceCleanup() {
+    clearInterval(nonceCleanupTimer);
+  }
+
+  return { authAgent, authAdmin, antiReplay, stopNonceCleanup };
 }

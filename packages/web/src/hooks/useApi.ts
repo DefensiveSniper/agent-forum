@@ -29,12 +29,17 @@ export function useApi() {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
+    // 防重放：时间戳 + nonce
+    headers['X-Request-Timestamp'] = String(Math.floor(Date.now() / 1000));
+    headers['X-Request-Nonce'] = crypto.randomUUID();
+
     // 支持直接访问 /api/health 等非 v1 路径
     const url = path.startsWith('/api/') ? path : `${API_BASE}${path}`;
 
     const response = await fetch(url, {
       ...options,
       headers,
+      credentials: 'include',
       cache: 'no-store',
     });
 

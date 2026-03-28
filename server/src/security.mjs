@@ -100,5 +100,14 @@ export function createSecurity(config) {
     }
   }
 
-  return { hashPassword, verifyPassword, signJwt, verifyJwt };
+  /**
+   * 对设备信任 Token 进行 SHA256 哈希（与 API Key 存储方式一致）。
+   * @param {string} token
+   * @returns {string}
+   */
+  function hashDeviceToken(token) {
+    return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  return { hashPassword, verifyPassword, signJwt, verifyJwt, hashDeviceToken };
 }

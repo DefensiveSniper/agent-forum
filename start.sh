@@ -10,4 +10,4 @@ if [ -f .env ]; then
 fi
 
 echo "Starting AgentForum..."
-node server/index.mjs
+npm start

@@ -7,10 +7,13 @@ import { createDatabase } from './database.mjs';
 import { createSecurity } from './security.mjs';
 import { createRateLimiter } from './rate-limiter.mjs';
 import { createRouter } from './router.mjs';
-import { MIME_TYPES, createFormatAgent, createSendJson, tryParseJson } from './http-utils.mjs';
+import { MIME_TYPES, createFormatAgent, createSendJson, tryParseJson, buildResponseHeaders } from './http-utils.mjs';
 import { createAuth } from './auth.mjs';
+import { createCaptchaService } from './captcha.mjs';
+import { SECURITY_HEADERS } from './security-headers.mjs';
 import { createWebSocketService } from './ws-service.mjs';
 import { createChannelMessagingService } from './channel-messaging.mjs';
+import { createMonitoringService } from './monitoring.mjs';
 import { registerRoutes } from './routes/index.mjs';
 import { seedAdmin } from './bootstrap-data.mjs';
 
@@ -46,7 +49,7 @@ async function runHandlers(handlers, req, res, sendJson) {
 }
 
 /**
- * 处理 CORS 预检请求。
+ * 处理 CORS 预检请求（动态 Origin 匹配 + 安全头）。
  * @param {object} req
  * @param {object} res
  * @param {object} config
@@ -55,12 +58,10 @@ async function runHandlers(handlers, req, res, sendJson) {
 function handlePreflight(req, res, config) {
   if (req.method !== 'OPTIONS') return false;
 
-  res.writeHead(204, {
-    'Access-Control-Allow-Origin': config.CORS_ORIGIN,
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  const headers = buildResponseHeaders(config, req.headers.origin, {
     'Access-Control-Max-Age': '86400',
   });
+  res.writeHead(204, headers);
   res.end();
   return true;
 }
@@ -98,6 +99,7 @@ function serveStaticFile({ pathname, res, config }) {
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     'Content-Type': contentType,
     'Cache-Control': 'no-cache, no-store, must-revalidate',
   });
@@ -148,12 +150,14 @@ export function startServer({ serverRoot }) {
     isRateLimited: rateLimiter.isRateLimited,
     tryParseJson,
   });
+  const monitoring = createMonitoringService({ ws });
   const formatAgent = createFormatAgent({ isAgentOnline: ws.isAgentOnline });
   const auth = createAuth({
     db,
     sendJson,
     verifyJwt: security.verifyJwt,
   });
+  const captcha = createCaptchaService();
 
   registerRoutes({
     config,
@@ -165,19 +169,36 @@ export function startServer({ serverRoot }) {
     auth,
     router,
     ws,
+    monitoring,
     messaging,
     tryParseJson,
+    captcha,
     skillsRoot: path.join(serverRoot, '../skills'),
   });
 
   const server = http.createServer(async (req, res) => {
-    if (handlePreflight(req, res, config)) return;
-
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host}`);
     const pathname = parsedUrl.pathname;
     const query = Object.fromEntries(parsedUrl.searchParams);
+    const requestStartedAt = Date.now();
+    const shouldTrackRequest = pathname.startsWith('/api/') && req.method !== 'OPTIONS';
 
-    const ip = req.socket.remoteAddress || 'unknown';
+    if (shouldTrackRequest) {
+      res.on('finish', () => {
+        monitoring.recordHttpRequest({
+          pathname,
+          statusCode: res.statusCode,
+          durationMs: Date.now() - requestStartedAt,
+        });
+      });
+    }
+
+    if (handlePreflight(req, res, config)) return;
+
+    const ip = config.TRUST_PROXY
+      ? (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown')
+      : (req.socket.remoteAddress || 'unknown');
+    req.ip = ip;
     if (pathname.startsWith('/api/')) {
       const { key, maxReqs, windowMs } = resolveHttpRateLimit(req, ip);
       if (rateLimiter.isRateLimited(key, maxReqs, windowMs)) {
@@ -218,10 +239,36 @@ export function startServer({ serverRoot }) {
    */
   function shutdown() {
     console.log('\n🛑 Shutting down...');
+    captcha.stopCleanup();
+    auth.stopNonceCleanup();
+    monitoring.stopSampling();
     ws.stopHeartbeat();
     server.close();
     db.cleanup();
     process.exit(0);
+  }
+
+  /**
+   * 处理服务监听阶段的启动错误。
+   * 遇到端口占用时输出明确提示，并清理已初始化资源。
+   * @param {NodeJS.ErrnoException} err
+   */
+  function handleServerError(err) {
+    monitoring.stopSampling();
+    ws.stopHeartbeat();
+    db.cleanup();
+
+    if (err?.code === 'EADDRINUSE') {
+      console.error(`\n❌ Port ${config.PORT} is already in use.`);
+      console.error(`   Existing process is listening on port ${config.PORT}.`);
+      console.error(`   Stop that process, or run: PORT=${config.PORT + 1} npm start`);
+      process.exit(1);
+      return;
+    }
+
+    console.error('\n❌ Server failed to start.');
+    console.error(err);
+    process.exit(1);
   }
 
   db.init();
@@ -231,7 +278,9 @@ export function startServer({ serverRoot }) {
     hashPassword: security.hashPassword,
   });
   ws.startHeartbeat();
+  monitoring.startSampling();
 
+  server.on('error', handleServerError);
   server.listen(config.PORT, () => {
     printStartupBanner(config);
   });

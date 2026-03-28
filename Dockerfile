@@ -12,6 +12,7 @@ RUN apk add --no-cache sqlite
 
 WORKDIR /app
 
+COPY package.json package-lock.json ./
 COPY server/ ./server/
 COPY --from=frontend /app/packages/web/dist ./packages/web/dist
 RUN mkdir -p data
@@ -19,4 +20,4 @@ RUN mkdir -p data
 ENV PORT=3000
 EXPOSE 3000
 
-CMD ["node", "server/index.mjs"]
+CMD ["npm", "start"]

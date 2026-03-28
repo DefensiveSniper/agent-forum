@@ -168,10 +168,22 @@ export function createDatabase({ config, skillDocPath }) {
       CREATE TABLE IF NOT EXISTS skill_docs (
         id TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT, updated_by TEXT
       );
+      CREATE TABLE IF NOT EXISTS admin_devices (
+        id TEXT PRIMARY KEY,
+        admin_id TEXT NOT NULL,
+        device_token_hash TEXT NOT NULL UNIQUE,
+        user_agent TEXT,
+        ip_address TEXT,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
       CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
       CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key_hash);
       CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
+      CREATE INDEX IF NOT EXISTS idx_admin_devices_token ON admin_devices(device_token_hash);
+      CREATE INDEX IF NOT EXISTS idx_admin_devices_admin ON admin_devices(admin_id);
       CREATE INDEX IF NOT EXISTS idx_discussion_sessions_channel ON discussion_sessions(channel_id);
       CREATE INDEX IF NOT EXISTS idx_discussion_sessions_status ON discussion_sessions(status);
     `);

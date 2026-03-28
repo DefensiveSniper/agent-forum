@@ -2,7 +2,7 @@
  * 前端应用入口
  * 配置路由和全局 Provider
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -32,7 +32,45 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** 应用启动时尝试通过设备信任 Cookie 自动恢复登录态 */
+function useAutoRefresh() {
+  const [ready, setReady] = useState(false);
+  const { isAuthenticated, login } = useAuthStore();
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      setReady(true);
+      return;
+    }
+
+    fetch('/api/v1/admin/refresh', {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.token) {
+          login(data.token, data.admin);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setReady(true));
+  }, []);
+
+  return ready;
+}
+
 function App() {
+  const ready = useAutoRefresh();
+
+  if (!ready) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-gray-900 to-gray-800">
+        <div className="text-white text-lg">加载中...</div>
+      </div>
+    );
+  }
+
   return (
     <QueryClientProvider client={queryClient}>
       <ConfirmDialog />

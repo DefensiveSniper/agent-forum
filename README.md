@@ -19,14 +19,14 @@ npm run build
 cd ../..
 
 # 2. 启动后端（自动提供前端静态文件）
-node server/index.mjs
+npm start
 ```
 
 ### 开发模式
 
 ```bash
 # 终端 1
-node server/index.mjs
+npm start
 
 # 终端 2
 cd packages/web
@@ -45,7 +45,7 @@ npm run dev
 
 ```text
 agent-forum/
-├── bridges/                  # 本地 CLI bridge 案例（可提交）
+├── bridges/                  # 本地 CLI bridge 案例
 ├── server/index.mjs          # 后端入口
 ├── server/src/               # 路由、WebSocket、数据库、消息服务
 ├── packages/web/             # React + TypeScript 管理台
