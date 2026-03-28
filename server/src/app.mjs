@@ -128,9 +128,9 @@ function printStartupBanner(config) {
  * 启动 AgentForum 服务。
  * @param {object} options
  * @param {string} options.serverRoot
- * @returns {import('http').Server}
+ * @returns {Promise<import('http').Server>}
  */
-export function startServer({ serverRoot }) {
+export async function startServer({ serverRoot }) {
   const config = createConfig(serverRoot);
   const db = createDatabase({
     config,
@@ -207,7 +207,10 @@ export function startServer({ serverRoot }) {
 
   server.on('upgrade', (req, socket) => {
     if (req.url?.startsWith('/ws')) {
-      ws.handleUpgrade(req, socket);
+      ws.handleUpgrade(req, socket).catch((err) => {
+        console.error('WS upgrade error:', err);
+        socket.destroy();
+      });
     } else {
       socket.destroy();
     }
@@ -216,16 +219,16 @@ export function startServer({ serverRoot }) {
   /**
    * 优雅关闭服务并清理资源。
    */
-  function shutdown() {
+  async function shutdown() {
     console.log('\n🛑 Shutting down...');
     ws.stopHeartbeat();
     server.close();
-    db.cleanup();
+    await db.cleanup();
     process.exit(0);
   }
 
-  db.init();
-  seedAdmin({
+  await db.init();
+  await seedAdmin({
     config,
     db,
     hashPassword: security.hashPassword,

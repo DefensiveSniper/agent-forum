@@ -1,6 +1,24 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-forum-db
+    environment:
+      POSTGRES_USER: agent_forum
+      POSTGRES_PASSWORD: agent_forum_dev
+      POSTGRES_DB: agent_forum
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_forum"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   app:
     build: .
     container_name: agent-forum
@@ -8,13 +26,15 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - PORT=3000
+      - DATABASE_URL=postgresql://agent_forum:agent_forum_dev@postgres:5432/agent_forum
       - JWT_SECRET=${JWT_SECRET:-please_change_this_in_production}
       - ADMIN_INIT_USERNAME=${ADMIN_INIT_USERNAME:-admin}
       - ADMIN_INIT_PASSWORD=${ADMIN_INIT_PASSWORD:-admin123}
       - CORS_ORIGIN=${CORS_ORIGIN:-*}
-    volumes:
-      - db-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  db-data:
+  pg-data:

@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import { eq, and, getTableColumns } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+import { agents, channelMembers, messages, discussionSessions } from './schema.mjs';
 
 /**
  * 创建频道消息与线性讨论服务。
@@ -8,11 +11,14 @@ import crypto from 'crypto';
  * @returns {object}
  */
 export function createChannelMessagingService({ db, tryParseJson }) {
+  const { orm } = db;
   const LINEAR_DISCUSSION_MODE = 'linear';
+
+  const rm = alias(messages, 'rm');
+  const ra = alias(agents, 'ra');
 
   /**
    * 统一补齐消息发送者展示名。
-   * 普通 Agent 优先使用查询结果，管理员消息则从 sender_id 还原展示名。
    * @param {string|null|undefined} senderId
    * @param {string|null|undefined} senderName
    * @returns {string|null}
@@ -27,16 +33,13 @@ export function createChannelMessagingService({ db, tryParseJson }) {
 
   /**
    * 生成回复消息的固定预览文案。
-   * 只保留前 maxLength 个字符，超出时追加省略号，供前端直接展示。
    * @param {string|null|undefined} content
    * @param {number} [maxLength=15]
    * @returns {string|null}
    */
   function buildReplyPreview(content, maxLength = 15) {
     if (typeof content !== 'string' || !content.length) return null;
-    return content.length > maxLength
-      ? `${content.slice(0, maxLength)}...`
-      : content;
+    return content.length > maxLength ? `${content.slice(0, maxLength)}...` : content;
   }
 
   /**
@@ -46,12 +49,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
    */
   function normalizeIdList(value) {
     if (!Array.isArray(value)) return [];
-
-    return [...new Set(
-      value
-        .map((item) => typeof item === 'string' ? item.trim() : '')
-        .filter(Boolean)
-    )];
+    return [...new Set(value.map((item) => typeof item === 'string' ? item.trim() : '').filter(Boolean))];
   }
 
   /**
@@ -68,33 +66,32 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   /**
    * 读取频道内全部成员。
    * @param {string} channelId
-   * @returns {Array<{ id: string, name: string, status: string }>}
+   * @returns {Promise<Array<{ id: string, name: string, status: string }>>}
    */
-  function getChannelMembers(channelId) {
-    return db.all(`SELECT a.id, a.name, a.status
-      FROM channel_members cm
-      INNER JOIN agents a ON a.id = cm.agent_id
-      WHERE cm.channel_id = ${db.esc(channelId)}
-      ORDER BY cm.joined_at ASC, a.created_at ASC`);
+  async function getChannelMembers(channelId) {
+    return orm.select({ id: agents.id, name: agents.name, status: agents.status })
+      .from(channelMembers)
+      .innerJoin(agents, eq(agents.id, channelMembers.agent_id))
+      .where(eq(channelMembers.channel_id, channelId))
+      .orderBy(channelMembers.joined_at, agents.created_at);
   }
 
   /**
    * 将 Agent ID 解析为频道内成员，并保留输入顺序。
    * @param {string} channelId
    * @param {string[]} agentIds
-   * @returns {{ agents: Array<{ id: string, name: string, status: string }>, missingIds: string[] }}
+   * @returns {Promise<{ agents: Array<object>, missingIds: string[] }>}
    */
-  function resolveChannelAgents(channelId, agentIds) {
+  async function resolveChannelAgents(channelId, agentIds) {
     const uniqueIds = normalizeIdList(agentIds);
-    if (uniqueIds.length === 0) {
-      return { agents: [], missingIds: [] };
-    }
+    if (uniqueIds.length === 0) return { agents: [], missingIds: [] };
 
-    const members = getChannelMembers(channelId);
+    const members = await getChannelMembers(channelId);
     const memberMap = new Map(members.map((member) => [member.id, member]));
-    const agents = uniqueIds.map((agentId) => memberMap.get(agentId)).filter(Boolean);
-    const missingIds = uniqueIds.filter((agentId) => !memberMap.has(agentId));
-    return { agents, missingIds };
+    return {
+      agents: uniqueIds.map((id) => memberMap.get(id)).filter(Boolean),
+      missingIds: uniqueIds.filter((id) => !memberMap.has(id)),
+    };
   }
 
   /**
@@ -108,7 +105,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   }
 
   /**
-   * 格式化讨论会话状态快照，供消息推送和历史读取复用。
+   * 格式化讨论会话状态快照。
    * @param {object|null} session
    * @returns {object|null}
    */
@@ -190,18 +187,20 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   /**
    * 读取单条消息并格式化。
    * @param {string} messageId
-   * @returns {object|null}
+   * @returns {Promise<object|null>}
    */
-  function getFormattedMessageById(messageId) {
-    const row = db.get(`SELECT m.*, a.name AS sender_name,
-      rm.sender_id AS reply_sender_id,
-      ra.name AS reply_sender_name,
-      rm.content AS reply_content
-      FROM messages m
-      LEFT JOIN messages rm ON rm.id = m.reply_to
-      LEFT JOIN agents ra ON ra.id = rm.sender_id
-      LEFT JOIN agents a ON a.id = m.sender_id
-      WHERE m.id = ${db.esc(messageId)}`);
+  async function getFormattedMessageById(messageId) {
+    const [row] = await orm.select({
+      ...getTableColumns(messages),
+      sender_name: agents.name,
+      reply_sender_id: rm.sender_id,
+      reply_sender_name: ra.name,
+      reply_content: rm.content,
+    }).from(messages)
+      .leftJoin(agents, eq(agents.id, messages.sender_id))
+      .leftJoin(rm, eq(rm.id, messages.reply_to))
+      .leftJoin(ra, eq(ra.id, rm.sender_id))
+      .where(eq(messages.id, messageId));
     return formatMessage(row);
   }
 
@@ -209,15 +208,12 @@ export function createChannelMessagingService({ db, tryParseJson }) {
    * 解析并校验消息中的 mentions。
    * @param {string} channelId
    * @param {string[]} mentionAgentIds
-   * @returns {{ mentions: Array<{ agentId: string, agentName: string }>, missingIds: string[] }}
+   * @returns {Promise<{ mentions: Array<object>, missingIds: string[] }>}
    */
-  function resolveMentions(channelId, mentionAgentIds) {
-    const { agents, missingIds } = resolveChannelAgents(channelId, mentionAgentIds);
+  async function resolveMentions(channelId, mentionAgentIds) {
+    const { agents: resolvedAgents, missingIds } = await resolveChannelAgents(channelId, mentionAgentIds);
     return {
-      mentions: agents.map((agent) => ({
-        agentId: agent.id,
-        agentName: agent.name,
-      })),
+      mentions: resolvedAgents.map((agent) => ({ agentId: agent.id, agentName: agent.name })),
       missingIds,
     };
   }
@@ -226,21 +222,22 @@ export function createChannelMessagingService({ db, tryParseJson }) {
    * 读取并验证被回复消息，返回其发送者 ID。
    * @param {string} channelId
    * @param {string|null|undefined} replyTo
-   * @returns {{ message: object|null, replyTargetAgentId: string|null }}
+   * @returns {Promise<{ message: object|null, replyTargetAgentId: string|null }>}
    */
-  function resolveReplyTarget(channelId, replyTo) {
-    if (!replyTo) {
-      return { message: null, replyTargetAgentId: null };
-    }
+  async function resolveReplyTarget(channelId, replyTo) {
+    if (!replyTo) return { message: null, replyTargetAgentId: null };
 
-    const replyMessage = db.get(`SELECT m.id, m.sender_id, m.content, a.name AS sender_name
-      FROM messages m
-      LEFT JOIN agents a ON a.id = m.sender_id
-      WHERE m.id = ${db.esc(replyTo)}
-        AND m.channel_id = ${db.esc(channelId)}`);
+    const [replyMessage] = await orm.select({
+      id: messages.id,
+      sender_id: messages.sender_id,
+      content: messages.content,
+      sender_name: agents.name,
+    }).from(messages)
+      .leftJoin(agents, eq(agents.id, messages.sender_id))
+      .where(and(eq(messages.id, replyTo), eq(messages.channel_id, channelId)));
 
     return {
-      message: replyMessage,
+      message: replyMessage || null,
       replyTargetAgentId: replyMessage?.sender_id || null,
     };
   }
@@ -248,35 +245,24 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   /**
    * 读取讨论会话。
    * @param {string} sessionId
-   * @returns {object|null}
+   * @returns {Promise<object|undefined>}
    */
-  function getDiscussionSession(sessionId) {
-    if (!sessionId) return null;
-    return db.get(`SELECT * FROM discussion_sessions WHERE id = ${db.esc(sessionId)}`);
+  async function getDiscussionSession(sessionId) {
+    if (!sessionId) return undefined;
+    const [session] = await orm.select().from(discussionSessions).where(eq(discussionSessions.id, sessionId));
+    return session;
   }
 
   /**
-   * 校验并推进线性讨论会话，自动计算下一位 agent 的 mention。
-   * 服务端自动注入正确的 mentions，调用方无需手动指定。
+   * 校验并推进线性讨论会话。
    * @param {object} options
-   * @param {object} options.session
-   * @param {string} options.senderId
-   * @param {string|null|undefined} options.replyTo
-   * @returns {{ nextState: object, discussionState: object, autoMentions: Array<{ agentId: string, agentName: string }> }}
+   * @returns {Promise<{ nextState: object, discussionState: object, autoMentions: Array<object> }>}
    */
-  function advanceLinearDiscussion({ session, senderId, replyTo }) {
-    if (!session) {
-      throw new Error('Discussion session not found');
-    }
-    if (session.status !== 'active') {
-      throw new Error('Discussion session is not active');
-    }
-    if (session.next_agent_id !== senderId) {
-      throw new Error('Only the expected agent can reply in this discussion session');
-    }
-    if (session.last_message_id !== replyTo) {
-      throw new Error('Discussion replies must reply to the latest session message');
-    }
+  async function advanceLinearDiscussion({ session, senderId, replyTo }) {
+    if (!session) throw new Error('Discussion session not found');
+    if (session.status !== 'active') throw new Error('Discussion session is not active');
+    if (session.next_agent_id !== senderId) throw new Error('Only the expected agent can reply in this discussion session');
+    if (session.last_message_id !== replyTo) throw new Error('Discussion replies must reply to the latest session message');
 
     const participantAgentIds = getSessionParticipantIds(session);
     const currentIndex = Number(session.current_index || 0);
@@ -287,12 +273,11 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     const finalTurn = completedAfterReply >= maxRounds;
     const expectedNextAgentId = finalTurn ? null : participantAgentIds[nextIndex];
 
-    // 自动计算 mentions：非最后一轮则 @ 下一位 agent，最后一轮不 mention 任何人
     let autoMentions = [];
     if (!finalTurn && expectedNextAgentId) {
-      const { agents } = resolveChannelAgents(session.channel_id, [expectedNextAgentId]);
-      if (agents.length > 0) {
-        autoMentions = [{ agentId: agents[0].id, agentName: agents[0].name }];
+      const { agents: resolvedAgents } = await resolveChannelAgents(session.channel_id, [expectedNextAgentId]);
+      if (resolvedAgents.length > 0) {
+        autoMentions = [{ agentId: resolvedAgents[0].id, agentName: resolvedAgents[0].name }];
       }
     }
 
@@ -304,65 +289,40 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       status: finalTurn ? 'completed' : 'active',
     };
 
-    return {
-      nextState,
-      discussionState: buildDiscussionStateSnapshot(nextState),
-      autoMentions,
-    };
+    return { nextState, discussionState: buildDiscussionStateSnapshot(nextState), autoMentions };
   }
 
   /**
    * 创建新的线性讨论会话，并生成根消息。
    * @param {object} options
-   * @param {string} options.channelId
-   * @param {string} options.senderId
-   * @param {string} options.senderName
-   * @param {string} options.content
-   * @param {string[]} options.participantAgentIds
-   * @param {number} options.maxRounds
-   * @param {Function} options.isAgentOnline
-   * @returns {{ message: object, discussion: object, sender: { id: string, name: string } }}
+   * @returns {Promise<{ message: object, discussion: object, sender: { id: string, name: string } }>}
    */
-  function createLinearDiscussionSession({
-    channelId,
-    senderId,
-    senderName,
-    content,
-    participantAgentIds,
-    maxRounds,
-    isAgentOnline,
+  async function createLinearDiscussionSession({
+    channelId, senderId, senderName, content, participantAgentIds, maxRounds, isAgentOnline,
   }) {
     const normalizedParticipantIds = normalizeIdList(participantAgentIds);
-    if (normalizedParticipantIds.length < 1) {
-      throw new Error('Linear discussion requires at least 1 participant agent');
-    }
+    if (normalizedParticipantIds.length < 1) throw new Error('Linear discussion requires at least 1 participant agent');
 
     const resolvedRounds = parsePositiveInt(maxRounds);
-    if (!resolvedRounds) {
-      throw new Error('maxRounds must be a positive integer');
-    }
+    if (!resolvedRounds) throw new Error('maxRounds must be a positive integer');
 
-    const { agents, missingIds } = resolveChannelAgents(channelId, normalizedParticipantIds);
-    if (missingIds.length > 0) {
-      throw new Error(`Some participant agents are not channel members: ${missingIds.join(', ')}`);
-    }
+    const { agents: resolvedAgents, missingIds } = await resolveChannelAgents(channelId, normalizedParticipantIds);
+    if (missingIds.length > 0) throw new Error(`Some participant agents are not channel members: ${missingIds.join(', ')}`);
 
     const offlineAgents = typeof isAgentOnline === 'function'
-      ? agents.filter((agent) => !isAgentOnline(agent.id))
+      ? resolvedAgents.filter((agent) => !isAgentOnline(agent.id))
       : [];
-    if (offlineAgents.length > 0) {
-      throw new Error(`Some participant agents are offline: ${offlineAgents.map((agent) => agent.name).join(', ')}`);
-    }
+    if (offlineAgents.length > 0) throw new Error(`Some participant agents are offline: ${offlineAgents.map((a) => a.name).join(', ')}`);
 
     const sessionId = crypto.randomUUID();
     const messageId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const firstAgent = agents[0];
+    const firstAgent = resolvedAgents[0];
     const initialSession = {
       id: sessionId,
       channel_id: channelId,
       root_message_id: messageId,
-      participant_agent_ids: JSON.stringify(agents.map((agent) => agent.id)),
+      participant_agent_ids: JSON.stringify(resolvedAgents.map((a) => a.id)),
       current_index: 0,
       completed_rounds: 0,
       max_rounds: resolvedRounds,
@@ -377,46 +337,22 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     const discussionState = buildDiscussionStateSnapshot(initialSession);
     const mentions = [{ agentId: firstAgent.id, agentName: firstAgent.name }];
 
-    db.exec(`
-      BEGIN;
-      INSERT INTO discussion_sessions (
-        id, channel_id, root_message_id, participant_agent_ids, current_index,
-        completed_rounds, max_rounds, next_agent_id, last_message_id, status,
-        created_by, created_at, updated_at, closed_at
-      ) VALUES (
-        ${db.esc(sessionId)},
-        ${db.esc(channelId)},
-        ${db.esc(messageId)},
-        ${db.esc(initialSession.participant_agent_ids)},
-        ${db.esc(initialSession.current_index)},
-        ${db.esc(initialSession.completed_rounds)},
-        ${db.esc(initialSession.max_rounds)},
-        ${db.esc(initialSession.next_agent_id)},
-        ${db.esc(initialSession.last_message_id)},
-        ${db.esc(initialSession.status)},
-        ${db.esc(senderId)},
-        ${db.esc(now)},
-        ${db.esc(now)},
-        NULL
-      );
-      INSERT INTO messages (
-        id, channel_id, sender_id, content, content_type, reply_to, created_at,
-        mentions, reply_target_agent_id, discussion_session_id, discussion_state
-      ) VALUES (
-        ${db.esc(messageId)},
-        ${db.esc(channelId)},
-        ${db.esc(senderId)},
-        ${db.esc(content)},
-        'text',
-        NULL,
-        ${db.esc(now)},
-        ${db.esc(JSON.stringify(mentions))},
-        NULL,
-        ${db.esc(sessionId)},
-        ${db.esc(JSON.stringify(discussionState))}
-      );
-      COMMIT;
-    `);
+    await orm.transaction(async (tx) => {
+      await tx.insert(discussionSessions).values(initialSession);
+      await tx.insert(messages).values({
+        id: messageId,
+        channel_id: channelId,
+        sender_id: senderId,
+        content,
+        content_type: 'text',
+        reply_to: null,
+        created_at: now,
+        mentions: JSON.stringify(mentions),
+        reply_target_agent_id: null,
+        discussion_session_id: sessionId,
+        discussion_state: JSON.stringify(discussionState),
+      });
+    });
 
     const message = formatMessage({
       id: messageId,
@@ -433,100 +369,77 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       discussion_state: JSON.stringify(discussionState),
     });
 
-    return {
-      message,
-      discussion: discussionState,
-      sender: { id: senderId, name: senderName },
-    };
+    return { message, discussion: discussionState, sender: { id: senderId, name: senderName } };
   }
 
   /**
    * 创建普通频道消息，必要时推进线性讨论会话。
    * @param {object} options
-   * @param {string} options.channelId
-   * @param {string} options.senderId
-   * @param {string} options.senderName
-   * @param {string} options.content
-   * @param {string} [options.contentType]
-   * @param {string|null} [options.replyTo]
-   * @param {string[]} [options.mentionAgentIds]
-   * @param {string|null} [options.discussionSessionId]
-   * @returns {{ message: object, sender: { id: string, name: string }, discussion: object|null }}
+   * @returns {Promise<{ message: object, sender: { id: string, name: string }, discussion: object|null }>}
    */
-  function createChannelMessage({
-    channelId,
-    senderId,
-    senderName,
-    content,
-    contentType = 'text',
-    replyTo = null,
-    mentionAgentIds = [],
-    discussionSessionId = null,
+  async function createChannelMessage({
+    channelId, senderId, senderName, content,
+    contentType = 'text', replyTo = null, mentionAgentIds = [], discussionSessionId = null,
   }) {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    let { mentions, missingIds } = resolveMentions(channelId, mentionAgentIds);
-    if (missingIds.length > 0) {
-      throw new Error(`Some mention agents are not channel members: ${missingIds.join(', ')}`);
-    }
+    let { mentions, missingIds } = await resolveMentions(channelId, mentionAgentIds);
+    if (missingIds.length > 0) throw new Error(`Some mention agents are not channel members: ${missingIds.join(', ')}`);
 
-    const { message: replyMessage, replyTargetAgentId } = resolveReplyTarget(channelId, replyTo);
-    if (replyTo && !replyMessage) {
-      throw new Error('replyTo message not found in this channel');
-    }
+    const { message: replyMessage, replyTargetAgentId } = await resolveReplyTarget(channelId, replyTo);
+    if (replyTo && !replyMessage) throw new Error('replyTo message not found in this channel');
 
     let discussionState = null;
     let session = null;
-    let sessionUpdateSql = '';
     if (discussionSessionId) {
-      session = getDiscussionSession(discussionSessionId);
-      const result = advanceLinearDiscussion({
-        session,
-        senderId,
-        replyTo,
-      });
-      // 服务端自动注入讨论顺序中下一位 agent 的 mention，覆盖调用方传入的 mentions
+      session = await getDiscussionSession(discussionSessionId);
+      const result = await advanceLinearDiscussion({ session, senderId, replyTo });
       mentions = result.autoMentions;
-      const persistedNextState = {
-        ...result.nextState,
-        last_message_id: id,
-      };
+
+      const persistedNextState = { ...result.nextState, last_message_id: id };
       discussionState = buildDiscussionStateSnapshot(persistedNextState);
       const closedAt = result.nextState.status === 'completed' ? now : null;
-      sessionUpdateSql = `
-        UPDATE discussion_sessions SET
-          current_index = ${db.esc(result.nextState.current_index)},
-          completed_rounds = ${db.esc(result.nextState.completed_rounds)},
-          next_agent_id = ${db.esc(result.nextState.next_agent_id || null)},
-          last_message_id = ${db.esc(id)},
-          status = ${db.esc(result.nextState.status)},
-          updated_at = ${db.esc(now)},
-          closed_at = ${db.esc(closedAt)}
-        WHERE id = ${db.esc(discussionSessionId)};
-      `;
-    }
 
-    db.exec(`
-      BEGIN;
-      INSERT INTO messages (
-        id, channel_id, sender_id, content, content_type, reply_to, created_at,
-        mentions, reply_target_agent_id, discussion_session_id, discussion_state
-      ) VALUES (
-        ${db.esc(id)},
-        ${db.esc(channelId)},
-        ${db.esc(senderId)},
-        ${db.esc(content)},
-        ${db.esc(contentType || 'text')},
-        ${db.esc(replyTo || null)},
-        ${db.esc(now)},
-        ${db.esc(JSON.stringify(mentions))},
-        ${db.esc(replyTargetAgentId)},
-        ${db.esc(discussionSessionId || null)},
-        ${db.esc(discussionState ? JSON.stringify(discussionState) : null)}
-      );
-      ${sessionUpdateSql}
-      COMMIT;
-    `);
+      await orm.transaction(async (tx) => {
+        await tx.insert(messages).values({
+          id,
+          channel_id: channelId,
+          sender_id: senderId,
+          content,
+          content_type: contentType || 'text',
+          reply_to: replyTo || null,
+          created_at: now,
+          mentions: JSON.stringify(mentions),
+          reply_target_agent_id: replyTargetAgentId,
+          discussion_session_id: discussionSessionId,
+          discussion_state: discussionState ? JSON.stringify(discussionState) : null,
+        });
+
+        await tx.update(discussionSessions).set({
+          current_index: result.nextState.current_index,
+          completed_rounds: result.nextState.completed_rounds,
+          next_agent_id: result.nextState.next_agent_id || null,
+          last_message_id: id,
+          status: result.nextState.status,
+          updated_at: now,
+          closed_at: closedAt,
+        }).where(eq(discussionSessions.id, discussionSessionId));
+      });
+    } else {
+      await orm.insert(messages).values({
+        id,
+        channel_id: channelId,
+        sender_id: senderId,
+        content,
+        content_type: contentType || 'text',
+        reply_to: replyTo || null,
+        created_at: now,
+        mentions: JSON.stringify(mentions),
+        reply_target_agent_id: replyTargetAgentId,
+        discussion_session_id: null,
+        discussion_state: null,
+      });
+    }
 
     const message = formatMessage({
       id,
@@ -546,11 +459,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       discussion_state: discussionState ? JSON.stringify(discussionState) : null,
     });
 
-    return {
-      message,
-      sender: { id: senderId, name: senderName },
-      discussion: discussionState,
-    };
+    return { message, sender: { id: senderId, name: senderName }, discussion: discussionState };
   }
 
   return {
