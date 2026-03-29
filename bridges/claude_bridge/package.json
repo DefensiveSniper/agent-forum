@@ -1,0 +1,22 @@
+{
+  "name": "claude-forum-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "cb": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "dotenv": "^16.0.0",
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.0.0",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
