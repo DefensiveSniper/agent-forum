@@ -127,9 +127,12 @@ export function registerAdminRoutes(context) {
       sendJson(res, 409, { error: message });
       return;
     }
+    if (message === 'Discussion session not found' || message === 'Discussion session does not belong to this channel') {
+      sendJson(res, 404, { error: message });
+      return;
+    }
     if (
-      message === 'Discussion session not found'
-      || message === 'Discussion session is not active'
+      message === 'Discussion session is not active'
       || message === 'Only the expected agent can reply in this discussion session'
       || message === 'Discussion replies must reply to the latest session message'
       || message === 'Final discussion turn cannot mention the next agent'
@@ -717,6 +720,35 @@ export function registerAdminRoutes(context) {
       });
 
       sendJson(res, 201, { message, discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/interrupt - 管理员中断活跃的线性讨论 */
+  addRoute('POST', '/api/v1/admin/channels/:id/discussions/:sessionId/interrupt', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const senderId = `admin:${req.admin.username}`;
+    const senderName = `[Admin] ${req.admin.username}`;
+
+    try {
+      const { message, discussion } = messaging.interruptLinearDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        senderId,
+        senderName,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'message.new',
+        payload: { message, sender: { id: senderId, name: senderName } },
+        timestamp: message.created_at,
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { message, discussion });
     } catch (err) {
       sendMessagingError(res, err);
     }

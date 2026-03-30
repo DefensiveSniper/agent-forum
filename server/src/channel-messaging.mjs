@@ -110,18 +110,24 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   /**
    * 格式化讨论会话状态快照，供消息推送和历史读取复用。
    * @param {object|null} session
+   * @param {object} [options]
+   * @param {number} [options.messageRound] - 消息所属轮次（推进前 completedRounds + 1），覆盖自动计算值
    * @returns {object|null}
    */
-  function buildDiscussionStateSnapshot(session) {
+  function buildDiscussionStateSnapshot(session, { messageRound } = {}) {
     if (!session) return null;
 
     const participantAgentIds = getSessionParticipantIds(session);
     const completedRounds = Number(session.completed_rounds || 0);
     const maxRounds = Number(session.max_rounds || 0);
     const expectedSpeakerId = session.status === 'active' ? session.next_agent_id : null;
-    const currentRound = session.status === 'active'
-      ? Math.min(completedRounds + 1, maxRounds || completedRounds + 1)
-      : Math.max(completedRounds, maxRounds, 0);
+    // 若外部传入 messageRound，使用它（确保消息轮次=推进前 completedRounds+1）；
+    // 否则退回自动推算——对 active/interrupted 取 completedRounds+1，对 completed 取最终值。
+    const currentRound = messageRound != null
+      ? messageRound
+      : session.status === 'active' || session.status === 'interrupted'
+        ? Math.min(completedRounds + 1, maxRounds || completedRounds + 1)
+        : Math.max(completedRounds, maxRounds, 0);
 
     let nextSpeakerId = null;
     let finalTurn = session.status !== 'active';
@@ -304,9 +310,10 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       status: finalTurn ? 'completed' : 'active',
     };
 
+    // messageRound = 推进前 completedRounds + 1，代表本条消息所属轮次
     return {
       nextState,
-      discussionState: buildDiscussionStateSnapshot(nextState),
+      discussionState: buildDiscussionStateSnapshot(nextState, { messageRound: completedRounds + 1 }),
       autoMentions,
     };
   }
@@ -374,7 +381,8 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       updated_at: now,
       closed_at: null,
     };
-    const discussionState = buildDiscussionStateSnapshot(initialSession);
+    // 管理员开启讨论的根消息标记为 isSessionStart，前端用于区分显示格式
+    const discussionState = { ...buildDiscussionStateSnapshot(initialSession), isSessionStart: true };
     const mentions = [{ agentId: firstAgent.id, agentName: firstAgent.name }];
 
     db.exec(`
@@ -480,6 +488,8 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     let sessionUpdateSql = '';
     if (discussionSessionId) {
       session = getDiscussionSession(discussionSessionId);
+      // 记录推进前的 completedRounds，用于确定本条消息所属轮次
+      const completedRoundsBefore = Number(session.completed_rounds || 0);
       const result = advanceLinearDiscussion({
         session,
         senderId,
@@ -491,7 +501,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
         ...result.nextState,
         last_message_id: id,
       };
-      discussionState = buildDiscussionStateSnapshot(persistedNextState);
+      discussionState = buildDiscussionStateSnapshot(persistedNextState, { messageRound: completedRoundsBefore + 1 });
       const closedAt = result.nextState.status === 'completed' ? now : null;
       sessionUpdateSql = `
         UPDATE discussion_sessions SET
@@ -553,6 +563,90 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     };
   }
 
+  /**
+   * 中断活跃的线性讨论会话，将其状态设为 interrupted 并生成系统消息。
+   * @param {object} options
+   * @param {string} options.sessionId - 讨论会话 ID
+   * @param {string} options.channelId - 频道 ID
+   * @param {string} options.senderId - 执行中断的管理员 sender_id（格式 admin:username）
+   * @param {string} options.senderName - 管理员展示名
+   * @returns {{ message: object, discussion: object, sender: { id: string, name: string } }}
+   */
+  function interruptLinearDiscussion({ sessionId, channelId, senderId, senderName }) {
+    const session = getDiscussionSession(sessionId);
+    if (!session) {
+      throw new Error('Discussion session not found');
+    }
+    if (session.channel_id !== channelId) {
+      throw new Error('Discussion session does not belong to this channel');
+    }
+    if (session.status !== 'active') {
+      throw new Error('Discussion session is not active');
+    }
+
+    const messageId = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    const interruptedSession = {
+      ...session,
+      status: 'interrupted',
+      next_agent_id: null,
+      closed_at: now,
+      updated_at: now,
+    };
+    const discussionState = buildDiscussionStateSnapshot(interruptedSession);
+
+    const content = '管理员已中断此线性讨论。';
+
+    db.exec(`
+      BEGIN;
+      UPDATE discussion_sessions SET
+        status = 'interrupted',
+        next_agent_id = NULL,
+        closed_at = ${db.esc(now)},
+        updated_at = ${db.esc(now)}
+      WHERE id = ${db.esc(sessionId)};
+      INSERT INTO messages (
+        id, channel_id, sender_id, content, content_type, reply_to, created_at,
+        mentions, reply_target_agent_id, discussion_session_id, discussion_state
+      ) VALUES (
+        ${db.esc(messageId)},
+        ${db.esc(channelId)},
+        ${db.esc(senderId)},
+        ${db.esc(content)},
+        'text',
+        NULL,
+        ${db.esc(now)},
+        ${db.esc(JSON.stringify([]))},
+        NULL,
+        ${db.esc(sessionId)},
+        ${db.esc(JSON.stringify(discussionState))}
+      );
+      COMMIT;
+    `);
+
+    const message = formatMessage({
+      id: messageId,
+      channel_id: channelId,
+      sender_id: senderId,
+      sender_name: senderName,
+      content,
+      content_type: 'text',
+      reply_to: null,
+      created_at: now,
+      mentions: JSON.stringify([]),
+      reply_target_agent_id: null,
+      discussion_session_id: sessionId,
+      discussion_state: JSON.stringify(discussionState),
+    });
+
+    return {
+      message,
+      discussion: discussionState,
+      sender: { id: senderId, name: senderName },
+    };
+  }
+
   return {
     buildDiscussionStateSnapshot,
     createChannelMessage,
@@ -562,6 +656,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
     getChannelMembers,
     getDiscussionSession,
     getFormattedMessageById,
+    interruptLinearDiscussion,
     parsePositiveInt,
     resolveMentions,
   };

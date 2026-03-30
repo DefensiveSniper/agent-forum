@@ -5,7 +5,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Users, Hash, Send, Reply, X, Trash2, UserPlus } from 'lucide-react';
+import { ArrowLeft, Users, Hash, Send, Reply, X, Trash2, UserPlus, CircleStop } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
 import { useAuthStore } from '@/stores/auth';
 import { useAlertStore } from '@/stores/alert';
@@ -57,12 +57,13 @@ interface Message {
     completedRounds: number;
     currentRound: number;
     maxRounds: number;
-    status: 'active' | 'completed';
+    status: 'active' | 'completed' | 'interrupted';
     expectedSpeakerId: string | null;
     nextSpeakerId: string | null;
     finalTurn: boolean;
     rootMessageId: string;
     lastMessageId: string;
+    isSessionStart?: boolean;
   } | null;
 }
 
@@ -205,6 +206,31 @@ function getReplySummary(message: Message) {
   return `回复 ${replySenderName} 的消息${replyPreview}`;
 }
 
+/**
+ * 清洗线性讨论轮次输入，仅保留两位以内数字。
+ * 编辑过程中允许空字符串，避免单个数字无法删除或重输。
+ * @param {string} value
+ * @returns {string}
+ */
+function sanitizeDiscussionRoundsInput(value: string) {
+  return value.replace(/[^\d]/g, '').slice(0, 2);
+}
+
+/**
+ * 解析并校验线性讨论轮次。
+ * 仅接受大于 0 的整数，非法值统一返回 null。
+ * @param {string} value
+ * @returns {number | null}
+ */
+function parseDiscussionRounds(value: string) {
+  if (!value) return null;
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+
+  return parsed;
+}
+
 export default function ChannelDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -227,6 +253,7 @@ export default function ChannelDetailPage() {
   const [selectedDiscussionAgentIds, setSelectedDiscussionAgentIds] = useState<string[]>([]);
   const [discussionRounds, setDiscussionRounds] = useState('1');
   const [startingDiscussion, setStartingDiscussion] = useState(false);
+  const [interruptingSession, setInterruptingSession] = useState<string | null>(null);
   const [showInvitePanel, setShowInvitePanel] = useState(false);
   const [inviteSearch, setInviteSearch] = useState('');
   const [selectedInviteAgentIds, setSelectedInviteAgentIds] = useState<string[]>([]);
@@ -492,7 +519,8 @@ export default function ChannelDetailPage() {
   /** 发起线性多 Agent 讨论，会按选中顺序循环并以完整循环计一轮 */
   const handleStartDiscussion = async () => {
     const trimmed = comment.trim();
-    if (!id || !trimmed || startingDiscussion) return;
+    const maxRounds = parseDiscussionRounds(discussionRounds);
+    if (!id || !trimmed || startingDiscussion || !maxRounds) return;
 
     setStartingDiscussion(true);
     try {
@@ -501,7 +529,7 @@ export default function ChannelDetailPage() {
         body: JSON.stringify({
           content: trimmed,
           participantAgentIds: selectedDiscussionAgentIds,
-          maxRounds: Number.parseInt(discussionRounds, 10),
+          maxRounds,
         }),
       });
 
@@ -515,6 +543,26 @@ export default function ChannelDetailPage() {
       // 错误在 useApi 中处理
     } finally {
       setStartingDiscussion(false);
+    }
+  };
+
+  /**
+   * 管理员中断活跃的线性讨论。
+   * @param {string} sessionId - 讨论会话 ID
+   */
+  const handleInterruptDiscussion = async (sessionId: string) => {
+    if (!id || interruptingSession) return;
+
+    setInterruptingSession(sessionId);
+    try {
+      await apiFetch(`/admin/channels/${id}/discussions/${sessionId}/interrupt`, {
+        method: 'POST',
+      });
+      showAlert('线性讨论已中断', 'success');
+    } catch {
+      // 错误在 useApi 中处理
+    } finally {
+      setInterruptingSession(null);
     }
   };
 
@@ -597,6 +645,15 @@ export default function ChannelDetailPage() {
   const sortedMessages = [...messages].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
+
+  // 追踪每个讨论 session 的最新状态，用于正确渲染中断按钮
+  const latestDiscussionStatus = new Map<string, string>();
+  for (const msg of sortedMessages) {
+    if (msg.discussion?.id) {
+      latestDiscussionStatus.set(msg.discussion.id, msg.discussion.status);
+    }
+  }
+
   const memberNameMap = new Map((channel.members || []).map((member) => [member.agent_id, member.agent_name]));
   const memberIds = new Set((channel.members || []).map((member) => member.agent_id));
   const availableAgents = allAgents.filter((agent) => !memberIds.has(agent.id));
@@ -617,6 +674,7 @@ export default function ChannelDetailPage() {
     })
     .slice(0, 8);
   const discussionCandidates = (channel.members || []).filter((member) => member.online);
+  const resolvedDiscussionRounds = parseDiscussionRounds(discussionRounds);
 
   return (
     <div className="flex flex-col h-full -m-8">
@@ -729,12 +787,35 @@ export default function ChannelDetailPage() {
                             {formatTime(msg.created_at)}
                           </span>
                           {discussion && (
-                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${discussion.status === 'active' ? 'bg-indigo-50 text-indigo-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                              线性讨论 {discussion.currentRound}/{discussion.maxRounds} 轮
-                              {discussion.expectedSpeakerId
-                                ? ` · 下一位 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)}`
-                                : ' · 已收束'}
-                            </span>
+                            <>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                discussion.status === 'active'
+                                  ? 'bg-indigo-50 text-indigo-700'
+                                  : discussion.status === 'interrupted'
+                                    ? 'bg-red-50 text-red-700'
+                                    : 'bg-emerald-50 text-emerald-700'
+                              }`}>
+                                {discussion.isSessionStart
+                                  ? `线性讨论 ${discussion.maxRounds} 轮`
+                                  : `线性讨论 ${discussion.currentRound}/${discussion.maxRounds} 轮`}
+                                {discussion.status === 'interrupted'
+                                  ? ' · 已中断'
+                                  : discussion.expectedSpeakerId
+                                    ? ` · 下一位 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)}`
+                                    : ' · 已收束'}
+                              </span>
+                              {isAuthenticated && latestDiscussionStatus.get(discussion.id) === 'active' && (
+                                <button
+                                  onClick={() => handleInterruptDiscussion(discussion.id)}
+                                  disabled={interruptingSession === discussion.id}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50"
+                                  title="中断此线性讨论"
+                                >
+                                  <CircleStop size={10} />
+                                  {interruptingSession === discussion.id ? '中断中...' : '中断讨论'}
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       )}
@@ -806,7 +887,8 @@ export default function ChannelDetailPage() {
                     </label>
                     <input
                       value={discussionRounds}
-                      onChange={(e) => setDiscussionRounds(e.target.value.replace(/[^\d]/g, '').slice(0, 2) || '1')}
+                      onChange={(e) => setDiscussionRounds(sanitizeDiscussionRoundsInput(e.target.value))}
+                      inputMode="numeric"
                       className="w-16 rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
                     <span className="text-xs text-indigo-700">
@@ -842,7 +924,7 @@ export default function ChannelDetailPage() {
                   </div>
                 </div>
               )}
-              <div className="flex items-end gap-3">
+              <div className="flex items-stretch gap-3">
                 <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
@@ -861,8 +943,8 @@ export default function ChannelDetailPage() {
                           ? `回复 ${replyTo.sender_name || replyTo.sender_id.substring(0, 8)}，触发 Agent WS 回复… (Ctrl+Enter 发送)`
                           : '以管理员身份发送评论，输入 @ 可选择频道成员… (Ctrl+Enter 发送)'
                     }
-                    rows={2}
-                    className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder-gray-400"
+                    rows={1}
+                    className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2.5 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder-gray-400"
                   />
                   {mentionDraft && mentionCandidates.length > 0 && (
                     <div className="absolute left-0 right-0 bottom-full mb-2 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
@@ -889,10 +971,10 @@ export default function ChannelDetailPage() {
                   onClick={showDiscussionPanel ? handleStartDiscussion : toggleDiscussionPanel}
                   disabled={
                     showDiscussionPanel
-                      ? !comment.trim() || selectedDiscussionAgentIds.length < 1 || startingDiscussion
+                      ? !comment.trim() || selectedDiscussionAgentIds.length < 1 || !resolvedDiscussionRounds || startingDiscussion
                       : false
                   }
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 >
                   <Users size={14} />
                   {showDiscussionPanel ? (startingDiscussion ? '发起中...' : '开始讨论') : '线性讨论'}
@@ -900,7 +982,7 @@ export default function ChannelDetailPage() {
                 <button
                   onClick={handleSendComment}
                   disabled={!comment.trim() || sending || showDiscussionPanel}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 >
                   <Send size={14} />
                   {sending ? '发送中...' : '发送'}
