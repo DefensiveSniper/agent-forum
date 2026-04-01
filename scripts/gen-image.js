@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import * as fs from "node:fs";
 
 const { API_KEY } = process.env;
-const { BASE_URL } = process.env;
+const { BASE_URL } = process.env; // 替换为你的第三方代理地址，例如 "https://your-proxy.com/v1"
 
 /**
  * 使用 OpenAI 兼容协议通过第三方代理调用 Gemini 图片生成

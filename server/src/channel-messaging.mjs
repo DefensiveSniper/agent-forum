@@ -108,6 +108,47 @@ export function createChannelMessagingService({ db, tryParseJson }) {
   }
 
   /**
+   * 根据讨论进度生成面向下一位发言 Agent 的节奏引导指令。
+   * 从开始到结束收束力度逐步增强：首轮（发散）→ 中间（推进）→ 倒数第二轮（聚焦）→ 最后一轮（收束）→ 最终发言者（总结）。
+   * @param {object} options
+   * @param {string} options.status - 讨论状态
+   * @param {number} options.participantCount - 参与者数量
+   * @param {number} options.completedRounds - 已完成轮次
+   * @param {number} options.maxRounds - 总轮次
+   * @param {boolean} options.finalTurn - 是否为最终发言
+   * @returns {string|null} 指令文本，讨论非活跃时返回 null
+   */
+  function buildAgentInstruction({ status, participantCount, completedRounds, maxRounds, finalTurn }) {
+    if (status !== 'active') return null;
+
+    const nextSpeakerRound = completedRounds + 1;
+    const remainingRounds = maxRounds - completedRounds;
+    const context = `[线性讨论] 这是一场 ${participantCount} 位 Agent 参与的线性讨论。当前第 ${nextSpeakerRound}/${maxRounds} 轮。`;
+
+    // 优先级从高到低：最终发言者 > 最后一轮 > 倒数第二轮 > 首轮 > 中间轮次
+    if (finalTurn) {
+      return context
+        + '\n你是本次讨论的最终发言者，发言后讨论将结束。'
+        + '请回顾讨论中的关键共识与分歧，给出总结性结论，为整场讨论画上句号。';
+    }
+    if (remainingRounds === 1) {
+      return context.replace('。', '（最后一轮）。')
+        + '\n这是最后一轮讨论，请着重提炼前面讨论的核心观点，明确你的最终立场，归纳共识，为讨论收束做准备。避免引入全新话题。';
+    }
+    if (remainingRounds === 2) {
+      return context + ` 剩余 2 轮。`
+        + '\n讨论即将接近尾声，请开始聚焦核心论点，逐步凝练观点，减少发散性探索。';
+    }
+    if (completedRounds === 0) {
+      return context + ` 剩余 ${remainingRounds} 轮。`
+        + '\n讨论刚刚开始，请围绕主题充分展开你的观点，为后续讨论奠定基础。';
+    }
+    // 中间轮次
+    return context + ` 剩余 ${remainingRounds} 轮。`
+      + '\n请在前面讨论的基础上推进话题，回应已有观点并补充新的角度。注意讨论进度，适当控制发散程度。';
+  }
+
+  /**
    * 格式化讨论会话状态快照，供消息推送和历史读取复用。
    * @param {object|null} session
    * @param {object} [options]
@@ -140,6 +181,15 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       nextSpeakerId = finalTurn ? null : participantAgentIds[followingIndex];
     }
 
+    // 生成面向下一位发言 Agent 的节奏引导指令
+    const agentInstruction = buildAgentInstruction({
+      status: session.status,
+      participantCount: participantAgentIds.length,
+      completedRounds,
+      maxRounds,
+      finalTurn,
+    });
+
     return {
       id: session.id,
       mode: LINEAR_DISCUSSION_MODE,
@@ -154,6 +204,7 @@ export function createChannelMessagingService({ db, tryParseJson }) {
       finalTurn,
       rootMessageId: session.root_message_id,
       lastMessageId: session.last_message_id,
+      agentInstruction,
     };
   }
 
