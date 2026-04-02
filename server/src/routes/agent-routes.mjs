@@ -5,7 +5,7 @@ import crypto from 'crypto';
  * @param {object} context
  */
 export function registerAgentRoutes(context) {
-  const { router, auth, db, sendJson, formatAgent, rateLimiter } = context;
+  const { router, auth, db, sendJson, formatAgent, rateLimiter, ws } = context;
   const { addRoute } = router;
   const { authAgent } = auth;
 
@@ -82,5 +82,113 @@ export function registerAgentRoutes(context) {
     const agent = db.get(`SELECT * FROM agents WHERE id = ${db.esc(req.params.id)}`);
     if (!agent) return sendJson(res, 404, { error: 'Agent not found' });
     sendJson(res, 200, formatAgent(agent));
+  });
+
+  // ────── 能力注册表 ──────
+
+  const VALID_PROFICIENCIES = new Set(['basic', 'standard', 'expert']);
+
+  /** POST /api/v1/agents/me/capabilities - 注册/更新自身能力 */
+  addRoute('POST', '/api/v1/agents/me/capabilities', authAgent, (req, res) => {
+    const { capability, proficiency, description } = req.body;
+    if (!capability || typeof capability !== 'string') {
+      return sendJson(res, 400, { error: 'capability is required' });
+    }
+    const prof = proficiency || 'standard';
+    if (!VALID_PROFICIENCIES.has(prof)) {
+      return sendJson(res, 400, { error: `proficiency must be one of: ${[...VALID_PROFICIENCIES].join(', ')}` });
+    }
+
+    const existing = db.get(`SELECT id FROM agent_capabilities
+      WHERE agent_id = ${db.esc(req.agent.id)} AND capability = ${db.esc(capability)}`);
+
+    const now = new Date().toISOString();
+    if (existing) {
+      db.exec(`UPDATE agent_capabilities
+        SET proficiency = ${db.esc(prof)}, description = ${db.esc(description || null)}, registered_at = ${db.esc(now)}
+        WHERE id = ${db.esc(existing.id)}`);
+      const updated = db.get(`SELECT * FROM agent_capabilities WHERE id = ${db.esc(existing.id)}`);
+      return sendJson(res, 200, updated);
+    }
+
+    const id = crypto.randomUUID();
+    db.exec(`INSERT INTO agent_capabilities (id, agent_id, capability, proficiency, description, registered_at)
+      VALUES (${db.esc(id)}, ${db.esc(req.agent.id)}, ${db.esc(capability)}, ${db.esc(prof)}, ${db.esc(description || null)}, ${db.esc(now)})`);
+    const created = db.get(`SELECT * FROM agent_capabilities WHERE id = ${db.esc(id)}`);
+    sendJson(res, 201, created);
+  });
+
+  /** GET /api/v1/agents/me/capabilities - 查看自身已注册能力 */
+  addRoute('GET', '/api/v1/agents/me/capabilities', authAgent, (req, res) => {
+    sendJson(res, 200, db.all(`SELECT * FROM agent_capabilities
+      WHERE agent_id = ${db.esc(req.agent.id)} ORDER BY registered_at DESC`));
+  });
+
+  /** DELETE /api/v1/agents/me/capabilities/:capId - 移除自身某项能力 */
+  addRoute('DELETE', '/api/v1/agents/me/capabilities/:capId', authAgent, (req, res) => {
+    const cap = db.get(`SELECT id FROM agent_capabilities
+      WHERE id = ${db.esc(req.params.capId)} AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!cap) return sendJson(res, 404, { error: 'Capability not found' });
+
+    db.exec(`DELETE FROM agent_capabilities WHERE id = ${db.esc(req.params.capId)}`);
+    res.writeHead(204).end();
+  });
+
+  /** GET /api/v1/agents/:id/capabilities - 查看某 Agent 的能力列表 */
+  addRoute('GET', '/api/v1/agents/:id/capabilities', authAgent, (req, res) => {
+    const agent = db.get(`SELECT id FROM agents WHERE id = ${db.esc(req.params.id)}`);
+    if (!agent) return sendJson(res, 404, { error: 'Agent not found' });
+
+    sendJson(res, 200, db.all(`SELECT * FROM agent_capabilities
+      WHERE agent_id = ${db.esc(req.params.id)} ORDER BY registered_at DESC`));
+  });
+
+  /** GET /api/v1/capabilities - 列出平台能力目录 */
+  addRoute('GET', '/api/v1/capabilities', authAgent, (req, res) => {
+    const catalog = db.all('SELECT * FROM capability_catalog ORDER BY category, name');
+    sendJson(res, 200, catalog);
+  });
+
+  /** GET /api/v1/capabilities/:name/agents - 查询拥有某能力的 Agent 列表 */
+  addRoute('GET', '/api/v1/capabilities/:name/agents', authAgent, (req, res) => {
+    const proficiency = req.query.proficiency;
+    let sql = `SELECT ac.*, a.name AS agent_name, a.status AS agent_status
+      FROM agent_capabilities ac
+      LEFT JOIN agents a ON ac.agent_id = a.id
+      WHERE ac.capability = ${db.esc(req.params.name)}`;
+    if (proficiency && VALID_PROFICIENCIES.has(proficiency)) {
+      sql += ` AND ac.proficiency = ${db.esc(proficiency)}`;
+    }
+    sql += ' ORDER BY ac.proficiency DESC, ac.registered_at ASC';
+
+    const results = db.all(sql).map((row) => ({
+      ...row,
+      online: ws.isAgentOnline(row.agent_id),
+    }));
+    sendJson(res, 200, results);
+  });
+
+  /** GET /api/v1/agents/search - 按能力+熟练度搜索 Agent */
+  addRoute('GET', '/api/v1/agents/search', authAgent, (req, res) => {
+    const { capability, proficiency } = req.query;
+    if (!capability) return sendJson(res, 400, { error: 'capability query parameter required' });
+
+    let sql = `SELECT DISTINCT a.*, ac.capability, ac.proficiency, ac.description AS cap_description
+      FROM agents a
+      INNER JOIN agent_capabilities ac ON a.id = ac.agent_id
+      WHERE ac.capability = ${db.esc(capability)}`;
+    if (proficiency && VALID_PROFICIENCIES.has(proficiency)) {
+      sql += ` AND ac.proficiency = ${db.esc(proficiency)}`;
+    }
+    sql += ' ORDER BY ac.proficiency DESC, a.name ASC';
+
+    const results = db.all(sql).map((row) => ({
+      ...formatAgent(row),
+      capability: row.capability,
+      proficiency: row.proficiency,
+      capDescription: row.cap_description,
+      online: ws.isAgentOnline(row.id),
+    }));
+    sendJson(res, 200, results);
   });
 }

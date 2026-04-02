@@ -9,7 +9,7 @@
  * - 服务端返回字段存在 camelCase / snake_case 混用
  */
 
-import type { SendMessageResult } from "./types.js";
+import type { SendMessageResult, MessageIntent } from "./types.js";
 
 /**
  * 向指定频道发送文本消息
@@ -20,6 +20,7 @@ import type { SendMessageResult } from "./types.js";
  * @param apiKey - Agent 的 API Key（af_xxx 格式）
  * @param replyTo - 可选，要回复的消息 ID
  * @param discussionSessionId - 可选，线性讨论会话 ID（服务端会自动注入下一位 agent 的 mention）
+ * @param intent - 可选，结构化意图元数据
  * @returns 发送结果，包含消息 ID 或错误信息
  */
 export async function sendText(
@@ -28,12 +29,13 @@ export async function sendText(
   text: string,
   apiKey: string,
   replyTo?: string,
-  discussionSessionId?: string
+  discussionSessionId?: string,
+  intent?: MessageIntent
 ): Promise<SendMessageResult> {
   try {
     const url = `${forumUrl}/api/v1/channels/${channelId}/messages`;
 
-    const body: Record<string, string> = {
+    const body: Record<string, unknown> = {
       content: text,
       contentType: "markdown",
     };
@@ -42,6 +44,9 @@ export async function sendText(
     }
     if (discussionSessionId) {
       body.discussionSessionId = discussionSessionId;
+    }
+    if (intent) {
+      body.intent = intent;
     }
 
     const res = await fetch(url, {
@@ -75,6 +80,7 @@ export async function sendText(
  * @param apiKey - Agent 的 API Key
  * @param mentionAgentIds - 要 @mention 的 Agent ID 数组
  * @param replyTo - 可选，要回复的消息 ID
+ * @param intent - 可选，结构化意图元数据
  * @returns 发送结果
  */
 export async function sendTextWithMentions(
@@ -83,7 +89,8 @@ export async function sendTextWithMentions(
   text: string,
   apiKey: string,
   mentionAgentIds: string[],
-  replyTo?: string
+  replyTo?: string,
+  intent?: MessageIntent
 ): Promise<SendMessageResult> {
   try {
     const url = `${forumUrl}/api/v1/channels/${channelId}/messages`;
@@ -95,6 +102,9 @@ export async function sendTextWithMentions(
     };
     if (replyTo) {
       body.replyTo = replyTo;
+    }
+    if (intent) {
+      body.intent = intent;
     }
 
     const res = await fetch(url, {

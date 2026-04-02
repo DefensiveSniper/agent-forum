@@ -5,11 +5,12 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Users, Hash, Send, Reply, X, Trash2, UserPlus, CircleStop } from 'lucide-react';
+import { ArrowLeft, Users, Hash, Send, Reply, X, Trash2, UserPlus, CircleStop, ChevronDown, ChevronUp, Tag, Clock } from 'lucide-react';
 import { useApi } from '@/hooks/useApi';
 import { useAuthStore } from '@/stores/auth';
 import { useAlertStore } from '@/stores/alert';
 import { useConfirmStore } from '@/stores/confirm';
+import { usePromptStore } from '@/stores/prompt';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import EmptyState from '@/components/EmptyState';
 import StatusBadge from '@/components/StatusBadge';
@@ -21,6 +22,7 @@ interface Member {
   agent_status: 'active' | 'suspended';
   online: boolean;
   role: 'owner' | 'admin' | 'member';
+  team_role: string | null;
   joined_at: string;
 }
 
@@ -41,6 +43,7 @@ interface Message {
   channel_id: string;
   sender_id: string;
   sender_name?: string;
+  sender_team_role?: string | null;
   content: string;
   content_type: string;
   reply_to: string | null;
@@ -48,7 +51,7 @@ interface Message {
   reply_sender_name?: string | null;
   reply_preview?: string | null;
   created_at: string;
-  mentions?: Array<{ agentId: string; agentName: string }>;
+  mentions?: Array<{ agentId: string; agentName: string; teamRole?: string | null }>;
   discussion?: {
     id: string;
     mode: 'linear';
@@ -57,13 +60,26 @@ interface Message {
     completedRounds: number;
     currentRound: number;
     maxRounds: number;
-    status: 'active' | 'completed' | 'interrupted';
+    status: 'open' | 'in_progress' | 'waiting_approval' | 'done' | 'cancelled' | 'rejected';
     expectedSpeakerId: string | null;
     nextSpeakerId: string | null;
     finalTurn: boolean;
     rootMessageId: string;
     lastMessageId: string;
     isSessionStart?: boolean;
+    requiresApproval?: boolean;
+    approvalAgentId?: string | null;
+    resolution?: unknown;
+  } | null;
+  intent?: {
+    task_type?: string;
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    requires_approval?: boolean;
+    approval_status?: 'pending' | 'approved' | 'rejected' | null;
+    approved_by?: string | null;
+    deadline?: string | null;
+    tags?: string[];
+    custom?: Record<string, unknown>;
   } | null;
 }
 
@@ -91,6 +107,34 @@ interface StartDiscussionResponse {
   message: Message;
   discussion: NonNullable<Message['discussion']>;
 }
+
+/** 意图任务类型中文标签和图标 */
+const taskTypeLabels: Record<string, { label: string; icon: string }> = {
+  chat: { label: '闲聊', icon: '💬' },
+  code_review: { label: '代码审查', icon: '🔍' },
+  approval_request: { label: '审批请求', icon: '📋' },
+  task_assignment: { label: '任务分配', icon: '📌' },
+  info_share: { label: '信息共享', icon: '📢' },
+  question: { label: '提问', icon: '❓' },
+  decision: { label: '决策', icon: '⚖️' },
+  bug_report: { label: '缺陷报告', icon: '🐛' },
+  feature_request: { label: '功能需求', icon: '✨' },
+};
+
+/** 优先级样式映射 */
+const priorityStyles: Record<string, { bg: string; text: string; label: string }> = {
+  low: { bg: 'bg-gray-100', text: 'text-gray-600', label: '低' },
+  normal: { bg: 'bg-blue-50', text: 'text-blue-600', label: '普通' },
+  high: { bg: 'bg-orange-50', text: 'text-orange-600', label: '高' },
+  urgent: { bg: 'bg-red-50', text: 'text-red-600', label: '紧急' },
+};
+
+/** 审批状态样式映射 */
+const approvalStatusStyles: Record<string, { bg: string; text: string; label: string }> = {
+  pending: { bg: 'bg-yellow-50', text: 'text-yellow-700', label: '待审批' },
+  approved: { bg: 'bg-green-50', text: 'text-green-700', label: '已通过' },
+  rejected: { bg: 'bg-red-50', text: 'text-red-700', label: '已拒绝' },
+};
 
 /** 成员角色中文标签 */
 const roleLabels: Record<string, string> = {
@@ -252,6 +296,7 @@ export default function ChannelDetailPage() {
   const [showDiscussionPanel, setShowDiscussionPanel] = useState(false);
   const [selectedDiscussionAgentIds, setSelectedDiscussionAgentIds] = useState<string[]>([]);
   const [discussionRounds, setDiscussionRounds] = useState('1');
+  const [discussionRequiresApproval, setDiscussionRequiresApproval] = useState(false);
   const [startingDiscussion, setStartingDiscussion] = useState(false);
   const [interruptingSession, setInterruptingSession] = useState<string | null>(null);
   const [showInvitePanel, setShowInvitePanel] = useState(false);
@@ -259,6 +304,12 @@ export default function ChannelDetailPage() {
   const [selectedInviteAgentIds, setSelectedInviteAgentIds] = useState<string[]>([]);
   const [inviting, setInviting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showIntentPanel, setShowIntentPanel] = useState(false);
+  const [intentTaskType, setIntentTaskType] = useState('');
+  const [intentPriority, setIntentPriority] = useState('');
+  const [intentRequiresApproval, setIntentRequiresApproval] = useState(false);
+  const [intentDeadline, setIntentDeadline] = useState('');
+  const [updatingIntentMsgId, setUpdatingIntentMsgId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -403,6 +454,26 @@ export default function ChannelDetailPage() {
       showAlert('频道已被删除', 'warning');
       navigate('/channels');
     }
+
+    // 消息 intent 更新 → 更新对应消息的 intent 字段
+    if (event.type === 'message.intent_updated' && (event.channelId === id || (event.payload as { channelId?: string })?.channelId === id)) {
+      const { messageId, intent } = event.payload as { messageId: string; intent: Message['intent'] };
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === messageId ? { ...msg, intent } : msg))
+      );
+    }
+
+    // 讨论状态变更 → 更新关联消息中的 discussion.status
+    if (event.type === 'discussion.status_changed' && (event.channelId === id || (event.payload as { channelId?: string })?.channelId === id)) {
+      const { sessionId, toStatus } = event.payload as { sessionId: string; toStatus: string };
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.discussion?.id !== sessionId) return msg;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return { ...msg, discussion: { ...msg.discussion, status: toStatus as any } };
+        })
+      );
+    }
   });
 
   /**
@@ -524,21 +595,26 @@ export default function ChannelDetailPage() {
 
     setStartingDiscussion(true);
     try {
+      const intent = buildIntent();
       await apiFetch<StartDiscussionResponse>(`/admin/channels/${id}/discussions`, {
         method: 'POST',
         body: JSON.stringify({
           content: trimmed,
           participantAgentIds: selectedDiscussionAgentIds,
           maxRounds,
+          requiresApproval: discussionRequiresApproval || undefined,
+          ...(intent ? { intent } : {}),
         }),
       });
 
       setComment('');
       setReplyTo(null);
       setMentionDraft(null);
+      if (showIntentPanel) resetIntentForm();
       setShowDiscussionPanel(false);
       setSelectedDiscussionAgentIds([]);
       setDiscussionRounds('1');
+      setDiscussionRequiresApproval(false);
     } catch {
       // 错误在 useApi 中处理
     } finally {
@@ -563,6 +639,57 @@ export default function ChannelDetailPage() {
       // 错误在 useApi 中处理
     } finally {
       setInterruptingSession(null);
+    }
+  };
+
+  /**
+   * 讨论状态机操作（审批/拒绝/重开/关闭）。
+   * @param {string} sessionId - 讨论会话 ID
+   * @param {'approve' | 'reject' | 'reopen' | 'close'} action - 操作类型
+   */
+  const handleDiscussionAction = async (sessionId: string, action: 'approve' | 'reject' | 'reopen' | 'close') => {
+    if (!id) return;
+
+    let body: object | undefined;
+    if (action === 'reject') {
+      const reason = await usePromptStore.getState().prompt({
+        title: '拒绝讨论',
+        message: '请输入拒绝原因（可选）',
+        placeholder: '拒绝原因',
+      });
+      if (reason === null) return;
+      body = { reason: reason.trim() || undefined };
+    } else if (action === 'reopen') {
+      const rounds = await usePromptStore.getState().prompt({
+        title: '重新开启讨论',
+        message: '追加的讨论轮次数',
+        defaultValue: '1',
+        inputType: 'number',
+      });
+      if (rounds === null) return;
+      body = { additionalRounds: Number(rounds) || 1 };
+    } else if (action === 'close') {
+      body = { resolution: '讨论在拒绝后被直接关闭' };
+    }
+
+    const actionMap: Record<string, { endpoint: string; successMsg: string }> = {
+      approve: { endpoint: 'approve', successMsg: '讨论已通过审批' },
+      reject: { endpoint: 'reject', successMsg: '讨论已被拒绝' },
+      reopen: { endpoint: 'reopen', successMsg: '讨论已重新开启' },
+      close: { endpoint: 'approve', successMsg: '讨论已关闭' },
+    };
+
+    const config = actionMap[action];
+    if (!config) return;
+
+    try {
+      await apiFetch(`/admin/channels/${id}/discussions/${sessionId}/${config.endpoint}`, {
+        method: 'POST',
+        body: JSON.stringify(body || {}),
+      });
+      showAlert(config.successMsg, 'success');
+    } catch {
+      // 错误在 useApi 中处理
     }
   };
 
@@ -593,6 +720,49 @@ export default function ChannelDetailPage() {
     }
   };
 
+  /**
+   * 构建当前意图面板的 intent 对象。
+   * 所有字段为空时返回 null，表示不携带意图。
+   */
+  const buildIntent = () => {
+    if (!showIntentPanel) return undefined;
+    const intent: NonNullable<Message['intent']> = {};
+    if (intentTaskType) intent.task_type = intentTaskType;
+    if (intentPriority) intent.priority = intentPriority as 'low' | 'normal' | 'high' | 'urgent';
+    if (intentRequiresApproval) intent.requires_approval = true;
+    if (intentDeadline) intent.deadline = new Date(intentDeadline).toISOString();
+    return Object.keys(intent).length > 0 ? intent : undefined;
+  };
+
+  /** 重置意图面板表单 */
+  const resetIntentForm = () => {
+    setIntentTaskType('');
+    setIntentPriority('');
+    setIntentRequiresApproval(false);
+    setIntentDeadline('');
+  };
+
+  /**
+   * 更新消息审批状态（approve/reject）。
+   * @param {string} messageId - 目标消息 ID
+   * @param {'approved' | 'rejected'} status - 审批结果
+   */
+  const handleUpdateApproval = async (messageId: string, status: 'approved' | 'rejected') => {
+    if (!id || updatingIntentMsgId) return;
+    setUpdatingIntentMsgId(messageId);
+    try {
+      await apiFetch(`/admin/channels/${id}/messages/${messageId}/intent`, {
+        method: 'PATCH',
+        body: JSON.stringify({ approval_status: status }),
+      });
+      showAlert(status === 'approved' ? '已批准' : '已拒绝', 'success');
+    } catch {
+      // 错误在 useApi 中处理
+    } finally {
+      setUpdatingIntentMsgId(null);
+    }
+  };
+
   /** 管理员发送评论 */
   const handleSendComment = async () => {
     const trimmed = comment.trim();
@@ -600,6 +770,7 @@ export default function ChannelDetailPage() {
     setSending(true);
     try {
       const mentionAgentIds = channel ? extractMentionAgentIds(trimmed, channel.members || []) : [];
+      const intent = buildIntent();
       await apiFetch(`/admin/channels/${id}/messages`, {
         method: 'POST',
         body: JSON.stringify({
@@ -607,11 +778,13 @@ export default function ChannelDetailPage() {
           contentType: 'text',
           replyTo: replyTo?.id || null,
           mentionAgentIds,
+          ...(intent ? { intent } : {}),
         }),
       });
       setComment('');
       setReplyTo(null);
       setMentionDraft(null);
+      if (showIntentPanel) resetIntentForm();
       // 新消息会通过 WebSocket 推送，无需手动追加
     } catch {
       // 错误在 useApi 中处理
@@ -783,40 +956,94 @@ export default function ChannelDetailPage() {
                               管理员
                             </span>
                           )}
+                          {!isAdmin && msg.sender_team_role && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 text-sky-600 border border-sky-200">
+                              {msg.sender_team_role}
+                            </span>
+                          )}
                           <span className="text-xs text-gray-400">
                             {formatTime(msg.created_at)}
                           </span>
-                          {discussion && (
-                            <>
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                discussion.status === 'active'
-                                  ? 'bg-indigo-50 text-indigo-700'
-                                  : discussion.status === 'interrupted'
-                                    ? 'bg-red-50 text-red-700'
-                                    : 'bg-emerald-50 text-emerald-700'
-                              }`}>
-                                {discussion.isSessionStart
-                                  ? `线性讨论 ${discussion.maxRounds} 轮`
-                                  : `线性讨论 ${discussion.currentRound}/${discussion.maxRounds} 轮`}
-                                {discussion.status === 'interrupted'
-                                  ? ' · 已中断'
-                                  : discussion.expectedSpeakerId
-                                    ? ` · 下一位 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)}`
-                                    : ' · 已收束'}
-                              </span>
-                              {isAuthenticated && latestDiscussionStatus.get(discussion.id) === 'active' && (
-                                <button
-                                  onClick={() => handleInterruptDiscussion(discussion.id)}
-                                  disabled={interruptingSession === discussion.id}
-                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50"
-                                  title="中断此线性讨论"
-                                >
-                                  <CircleStop size={10} />
-                                  {interruptingSession === discussion.id ? '中断中...' : '中断讨论'}
-                                </button>
-                              )}
-                            </>
-                          )}
+                          {discussion && (() => {
+                            const statusColors: Record<string, string> = {
+                              open: 'bg-gray-100 text-gray-600',
+                              in_progress: 'bg-indigo-50 text-indigo-700',
+                              waiting_approval: 'bg-amber-50 text-amber-700',
+                              done: 'bg-emerald-50 text-emerald-700',
+                              cancelled: 'bg-red-50 text-red-700',
+                              rejected: 'bg-orange-50 text-orange-700',
+                            };
+                            const statusLabels: Record<string, string> = {
+                              open: discussion.expectedSpeakerId
+                                ? `等待 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)} 发言`
+                                : '等待发言',
+                              in_progress: discussion.expectedSpeakerId
+                                ? `下一位 ${memberNameMap.get(discussion.expectedSpeakerId) || discussion.expectedSpeakerId.slice(0, 8)}`
+                                : '进行中',
+                              waiting_approval: '待审批',
+                              done: '已收束',
+                              cancelled: '已中断',
+                              rejected: '已拒绝',
+                            };
+                            const latestStatus = latestDiscussionStatus.get(discussion.id) || discussion.status;
+                            const canInterrupt = latestStatus === 'in_progress' || latestStatus === 'open';
+                            const canApprove = latestStatus === 'waiting_approval';
+                            const canReopen = latestStatus === 'rejected';
+                            return (
+                              <>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${statusColors[discussion.status] || 'bg-gray-100 text-gray-600'}`}>
+                                  {discussion.isSessionStart
+                                    ? `线性讨论 ${discussion.maxRounds} 轮`
+                                    : `线性讨论 ${discussion.currentRound}/${discussion.maxRounds} 轮`}
+                                  {' · '}{statusLabels[discussion.status] || discussion.status}
+                                  {discussion.requiresApproval && discussion.status !== 'done' && discussion.status !== 'cancelled' && ' · 需审批'}
+                                </span>
+                                {isAuthenticated && canInterrupt && (
+                                  <button
+                                    onClick={() => handleInterruptDiscussion(discussion.id)}
+                                    disabled={interruptingSession === discussion.id}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50"
+                                    title="中断此讨论"
+                                  >
+                                    <CircleStop size={10} />
+                                    {interruptingSession === discussion.id ? '中断中...' : '中断'}
+                                  </button>
+                                )}
+                                {isAuthenticated && canApprove && (
+                                  <>
+                                    <button
+                                      onClick={() => handleDiscussionAction(discussion.id, 'approve')}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700 hover:bg-green-100 transition-colors"
+                                    >
+                                      批准
+                                    </button>
+                                    <button
+                                      onClick={() => handleDiscussionAction(discussion.id, 'reject')}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors"
+                                    >
+                                      拒绝
+                                    </button>
+                                  </>
+                                )}
+                                {isAuthenticated && canReopen && (
+                                  <>
+                                    <button
+                                      onClick={() => handleDiscussionAction(discussion.id, 'reopen')}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors"
+                                    >
+                                      重新讨论
+                                    </button>
+                                    <button
+                                      onClick={() => handleDiscussionAction(discussion.id, 'close')}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
+                                    >
+                                      直接关闭
+                                    </button>
+                                  </>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
                       <div className={`text-sm text-gray-800 leading-relaxed ${compact ? '' : 'pl-11'} relative`}>
@@ -826,6 +1053,65 @@ export default function ChannelDetailPage() {
                           </div>
                         )}
                         {renderContent(msg.content, msg.content_type)}
+                        {/* 意图标签渲染 */}
+                        {msg.intent && (
+                          <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+                            {msg.intent.task_type && (() => {
+                              const tt = taskTypeLabels[msg.intent!.task_type!] || { label: msg.intent!.task_type!, icon: '🏷️' };
+                              return (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">
+                                  {tt.icon} {tt.label}
+                                </span>
+                              );
+                            })()}
+                            {msg.intent.priority && msg.intent.priority !== 'normal' && (() => {
+                              const ps = priorityStyles[msg.intent!.priority!] || priorityStyles.normal;
+                              return (
+                                <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${ps.bg} ${ps.text}`}>
+                                  {msg.intent!.priority === 'urgent' ? '🔴' : msg.intent!.priority === 'high' ? '🟠' : '⚪'} {ps.label}
+                                </span>
+                              );
+                            })()}
+                            {msg.intent.deadline && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-50 text-sky-700">
+                                <Clock size={10} /> {new Date(msg.intent.deadline).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            )}
+                            {msg.intent.tags?.map((tag) => (
+                              <span key={tag} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
+                                #{tag}
+                              </span>
+                            ))}
+                            {msg.intent.approval_status && (() => {
+                              const as_ = approvalStatusStyles[msg.intent!.approval_status!];
+                              if (!as_) return null;
+                              return (
+                                <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${as_.bg} ${as_.text}`}>
+                                  {msg.intent!.approval_status === 'pending' ? '⏳' : msg.intent!.approval_status === 'approved' ? '✅' : '❌'} {as_.label}
+                                </span>
+                              );
+                            })()}
+                            {/* 审批操作按钮 — 仅管理员可见，且状态为 pending 时显示 */}
+                            {isAuthenticated && msg.intent.requires_approval && msg.intent.approval_status === 'pending' && (
+                              <span className="inline-flex items-center gap-1 ml-1">
+                                <button
+                                  onClick={() => handleUpdateApproval(msg.id, 'approved')}
+                                  disabled={updatingIntentMsgId === msg.id}
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50"
+                                >
+                                  批准
+                                </button>
+                                <button
+                                  onClick={() => handleUpdateApproval(msg.id, 'rejected')}
+                                  disabled={updatingIntentMsgId === msg.id}
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50"
+                                >
+                                  拒绝
+                                </button>
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {/* 回复按钮：仅管理员登录后对非管理员消息显示，hover 时可见 */}
                         {isAuthenticated && !isAdmin && channel.is_archived !== 1 && (
                           <button
@@ -865,6 +1151,72 @@ export default function ChannelDetailPage() {
                   </button>
                 </div>
               )}
+              {/* 意图附加面板 */}
+              <div className="mb-1">
+                <button
+                  onClick={() => {
+                    setShowIntentPanel((prev) => {
+                      if (prev) resetIntentForm();
+                      return !prev;
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                >
+                  <Tag size={12} />
+                  附加意图
+                  {showIntentPanel ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+                {showIntentPanel && (
+                  <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div>
+                      <label className="block text-[11px] text-gray-500 mb-1">任务类型</label>
+                      <select
+                        value={intentTaskType}
+                        onChange={(e) => setIntentTaskType(e.target.value)}
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                      >
+                        <option value="">不指定</option>
+                        {Object.entries(taskTypeLabels).map(([key, { label, icon }]) => (
+                          <option key={key} value={key}>{icon} {label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-gray-500 mb-1">优先级</label>
+                      <select
+                        value={intentPriority}
+                        onChange={(e) => setIntentPriority(e.target.value)}
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                      >
+                        <option value="">不指定</option>
+                        {Object.entries(priorityStyles).map(([key, { label }]) => (
+                          <option key={key} value={key}>{label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-gray-500 mb-1">截止时间</label>
+                      <input
+                        type="datetime-local"
+                        value={intentDeadline}
+                        onChange={(e) => setIntentDeadline(e.target.value)}
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={intentRequiresApproval}
+                          onChange={(e) => setIntentRequiresApproval(e.target.checked)}
+                          className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                        />
+                        <span className="text-sm text-gray-700">需要审批</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
               {showDiscussionPanel && (
                 <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
@@ -881,7 +1233,7 @@ export default function ChannelDetailPage() {
                       取消讨论模式
                     </button>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <label className="text-xs text-indigo-800">
                       轮次
                     </label>
@@ -891,6 +1243,15 @@ export default function ChannelDetailPage() {
                       inputMode="numeric"
                       className="w-16 rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                     />
+                    <label className="inline-flex items-center gap-1.5 text-xs text-indigo-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={discussionRequiresApproval}
+                        onChange={(e) => setDiscussionRequiresApproval(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      需要审批
+                    </label>
                     <span className="text-xs text-indigo-700">
                       当前顺序：{selectedDiscussionAgentIds.map((agentId) => memberNameMap.get(agentId) || agentId.slice(0, 8)).join(' → ') || '未选择'}
                     </span>
@@ -921,6 +1282,31 @@ export default function ChannelDetailPage() {
                         </label>
                       ))
                     )}
+                  </div>
+                </div>
+              )}
+              {/* 意图附加面板 */}
+              {showIntentPanel && (
+                <div className="mb-2 rounded-lg border border-purple-200 bg-purple-50 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-purple-800">消息意图</span>
+                    <button onClick={() => { setShowIntentPanel(false); resetIntentForm(); }} className="text-xs text-purple-600 hover:text-purple-800">关闭</button>
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <select value={intentTaskType} onChange={(e) => setIntentTaskType(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                      <option value="">任务类型</option>
+                      {Object.entries(taskTypeLabels).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
+                      <option value="custom:other">自定义</option>
+                    </select>
+                    <select value={intentPriority} onChange={(e) => setIntentPriority(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                      <option value="">优先级</option>
+                      {Object.entries(priorityStyles).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                    </select>
+                    <label className="inline-flex items-center gap-1 text-xs text-purple-800 cursor-pointer">
+                      <input type="checkbox" checked={intentRequiresApproval} onChange={(e) => setIntentRequiresApproval(e.target.checked)} className="h-3.5 w-3.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+                      需要审批
+                    </label>
+                    <input type="datetime-local" value={intentDeadline} onChange={(e) => setIntentDeadline(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400" placeholder="截止时间" />
                   </div>
                 </div>
               )}
@@ -967,6 +1353,17 @@ export default function ChannelDetailPage() {
                     </div>
                   )}
                 </div>
+                <button
+                  onClick={() => setShowIntentPanel(!showIntentPanel)}
+                  className={`flex items-center justify-center gap-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors shrink-0 ${
+                    showIntentPanel
+                      ? 'border-purple-300 bg-purple-100 text-purple-700'
+                      : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                  }`}
+                  title="附加消息意图"
+                >
+                  <Tag size={14} />
+                </button>
                 <button
                   onClick={showDiscussionPanel ? handleStartDiscussion : toggleDiscussionPanel}
                   disabled={
@@ -1061,16 +1458,23 @@ export default function ChannelDetailPage() {
               return (
                 <div
                   key={m.agent_id}
-                  className="flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-gray-100 transition-colors"
+                  className="flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-gray-100 transition-colors group"
                 >
                   <div className={`w-7 h-7 rounded-md ${mColor.avatar} flex items-center justify-center text-xs font-semibold text-white shrink-0`}>
                     {(m.agent_name || '?')[0].toUpperCase()}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">
-                      {m.agent_name}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="min-w-0 shrink text-sm font-medium text-gray-900 truncate">
+                        {m.agent_name}
+                      </div>
+                      {m.team_role && (
+                        <span className="inline-block shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+                          {m.team_role}
+                        </span>
+                      )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap mt-1">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${roleBadgeClass[m.role] || ''}`}>
                         {roleLabels[m.role] || m.role}
                       </span>
@@ -1079,6 +1483,30 @@ export default function ChannelDetailPage() {
                       />
                     </div>
                   </div>
+                  {isAuthenticated && (
+                    <button
+                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all text-[10px] shrink-0"
+                      title="设置角色定位"
+                      onClick={async () => {
+                        const role = await usePromptStore.getState().prompt({
+                          title: '设置频道角色定位',
+                          message: '为该 Agent 设置频道内的功能角色（留空清除）',
+                          placeholder: '如 reviewer, architect, tester',
+                          defaultValue: m.team_role || '',
+                        });
+                        if (role === null) return;
+                        try {
+                          await apiFetch(`/admin/channels/${id}/members/${m.agent_id}/team-role`, {
+                            method: 'PATCH',
+                            body: JSON.stringify({ teamRole: role.trim() || null }),
+                          });
+                          loadChannel();
+                        } catch {}
+                      }}
+                    >
+                      角色
+                    </button>
+                  )}
                 </div>
               );
             })}

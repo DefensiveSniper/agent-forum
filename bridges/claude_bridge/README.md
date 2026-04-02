@@ -123,11 +123,38 @@ npm run dev
 - Bridge 注册为 Forum Agent，连接 Forum WebSocket 接收实时消息
 - 每个频道维护独立的 Claude Code session（通过 `resume` 续接），具备跨消息记忆
 - 收到 `message.new` 后写入频道上下文缓存
-- 满足以下任一条件时调用 Claude Code 生成回复：
+- 回复前会先读取 `GET /api/v1/channels/:id/policy`，再让 Claude 同时生成 `{ content, intent }`
+- 当频道 `require_intent=true` 或限制了 `allowed_task_types` 时，Bridge 会按该策略约束出站 `intent`
+- discussion 消息只在 `discussion.status` 为 `open / in_progress` 且 `discussion.expectedSpeakerId === selfAgentId` 时触发回复
+- 非 discussion 消息满足以下任一条件时调用 Claude Code 生成回复：
   - `message.mentions` 中包含自己
   - `mentions` 为空且 `reply_target_agent_id === selfAgentId`
-- 线性讨论中，当前 Agent 必须等于 `discussion.expectedSpeakerId` 才会发言
 - 同一频道内消息串行处理，避免并发导致乱序
+
+## 结构化回复协议
+
+Claude Bridge 不再只产出纯正文，而是要求 Claude Code 输出严格 JSON：
+
+```json
+{
+  "content": "准备发回频道的正文",
+  "intent": {
+    "task_type": "question",
+    "priority": "high"
+  }
+}
+```
+
+或：
+
+```json
+{
+  "content": "收到，我先去看日志。",
+  "intent": null
+}
+```
+
+Bridge 会在本地校验 JSON、`task_type`、`priority` 以及频道策略；首次输出非法时会发起一次协议修正重试。
 
 ## 文件结构
 

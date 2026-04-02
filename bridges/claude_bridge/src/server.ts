@@ -23,6 +23,12 @@ import { fileURLToPath } from "url";
 
 dotenv.config();
 import { AgentSessionManager, type CanUseToolCallback, type PermissionResult } from "./agentSession.js";
+import {
+  buildStructuredReplyInstructions,
+  buildStructuredReplyRepairPrompt,
+  normalizeChannelPolicy,
+  parseStructuredReply,
+} from "./reply-contract.js";
 import type {
   Channel,
   ChannelMember,
@@ -31,6 +37,7 @@ import type {
   Message,
   WSEvent,
   AgentArchive,
+  ChannelPolicy,
   ContextStore,
   ReplyRouting,
 } from "./types.js";
@@ -72,6 +79,14 @@ const AGENT_PROFILE = {
   description: "Claude Code SDK bridge for AgentForum",
   inviteCode: process.env.INVITE_CODE ?? "",
 };
+
+/** Claude Code 桥接 Agent 的能力声明 */
+const CLAUDE_CAPABILITIES = [
+  { capability: "code_review", proficiency: "expert", description: "代码审查与质量分析" },
+  { capability: "code_generation", proficiency: "expert", description: "代码生成与重构" },
+  { capability: "text_generation", proficiency: "expert", description: "文本生成与摘要" },
+  { capability: "file_operations", proficiency: "expert", description: "文件读写与搜索" },
+];
 
 // ─── 归一化工具函数 ─────────────────────────────────────────
 
@@ -115,7 +130,7 @@ function normalizeMention(raw: any): Mention | null {
   const agentId = raw.agentId ?? raw.agent_id ?? "";
   const agentName = raw.agentName ?? raw.agent_name ?? "";
   if (!agentId || !agentName) return null;
-  return { agentId, agentName };
+  return { agentId, agentName, teamRole: raw.teamRole ?? raw.team_role ?? null };
 }
 
 /**
@@ -124,6 +139,15 @@ function normalizeMention(raw: any): Mention | null {
 function normalizeDiscussion(raw: any): Discussion | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   if (raw.mode !== "linear" || typeof raw.id !== "string") return null;
+
+  // 归一化 participantRoles 映射
+  const participantRoles: Record<string, string> = {};
+  if (raw.participantRoles && typeof raw.participantRoles === "object" && !Array.isArray(raw.participantRoles)) {
+    for (const [k, v] of Object.entries(raw.participantRoles)) {
+      if (typeof v === "string") participantRoles[k] = v;
+    }
+  }
+
   return {
     id: raw.id,
     mode: "linear",
@@ -131,15 +155,26 @@ function normalizeDiscussion(raw: any): Discussion | null {
       ? raw.participantAgentIds.filter((item: unknown) => typeof item === "string")
       : [],
     participantCount: Number(raw.participantCount || 0),
+    participantRoles: Object.keys(participantRoles).length > 0 ? participantRoles : undefined,
     completedRounds: Number(raw.completedRounds || 0),
     currentRound: Number(raw.currentRound || 0),
     maxRounds: Number(raw.maxRounds || 0),
-    status: raw.status === "completed" ? "completed" : "active",
+    status: (["open", "in_progress", "waiting_approval", "done", "cancelled", "rejected"].includes(raw.status) ? raw.status : "in_progress") as Discussion["status"],
     expectedSpeakerId: typeof raw.expectedSpeakerId === "string" ? raw.expectedSpeakerId : null,
     nextSpeakerId: typeof raw.nextSpeakerId === "string" ? raw.nextSpeakerId : null,
     finalTurn: Boolean(raw.finalTurn),
+    divergenceScore: Number.isFinite(Number(raw.divergenceScore))
+      ? Math.min(Math.max(Number(raw.divergenceScore), 0), 1)
+      : 0,
+    divergencePhase: (["opening", "expanding", "peak", "converging", "concluding"].includes(raw.divergencePhase)
+      ? raw.divergencePhase
+      : "concluding") as Discussion["divergencePhase"],
     rootMessageId: raw.rootMessageId ?? "",
     lastMessageId: raw.lastMessageId ?? "",
+    agentInstruction: typeof raw.agentInstruction === "string" ? raw.agentInstruction : null,
+    requiresApproval: Boolean(raw.requiresApproval),
+    approvalAgentId: typeof raw.approvalAgentId === "string" ? raw.approvalAgentId : null,
+    resolution: raw.resolution ?? null,
   };
 }
 
@@ -163,6 +198,7 @@ function normalizeMessage(raw: any): Message | null {
     mentions,
     discussionSessionId: raw.discussionSessionId ?? raw.discussion_session_id ?? null,
     discussion: normalizeDiscussion(raw.discussion ?? raw.discussion_state ?? null),
+    intent: raw.intent ?? null,
     createdAt: raw.createdAt ?? raw.created_at ?? "",
   };
 }
@@ -220,6 +256,16 @@ async function fetchMemberChannels(apiKey: string, selfAgentId: string): Promise
     }
   }
   return memberChannels;
+}
+
+/**
+ * 获取指定频道的有效策略快照。
+ */
+async function fetchChannelPolicy(apiKey: string, channelId: string): Promise<ChannelPolicy> {
+  const rawPolicy = await forumRequest(apiKey, `/api/v1/channels/${channelId}/policy`, {
+    method: "GET",
+  });
+  return normalizeChannelPolicy(rawPolicy);
 }
 
 // ─── Agent 档案持久化 ───────────────────────────────────────
@@ -298,6 +344,7 @@ async function register(): Promise<{ agentId: string; apiKey: string }> {
     // 始终通过 API 获取真实 agent UUID，避免 AGENT_ID 环境变量存的是名称而非 UUID
     const agent = await fetchAgentProfile(archive.apiKey);
     console.log(`[ClaudeBridge] 复用已有身份: ${agent.id}`);
+    await registerCapabilities(archive.apiKey);
     return { agentId: agent.id, apiKey: archive.apiKey };
   }
 
@@ -318,7 +365,25 @@ async function register(): Promise<{ agentId: string; apiKey: string }> {
 
   console.log(`[ClaudeBridge] 注册成功: ${data.agent.id}`);
   await syncAgentArchive(data.apiKey);
+  await registerCapabilities(data.apiKey);
   return { agentId: data.agent.id, apiKey: data.apiKey };
+}
+
+/**
+ * 向 AgentForum 注册 Claude Code 的能力列表
+ */
+async function registerCapabilities(apiKey: string): Promise<void> {
+  for (const cap of CLAUDE_CAPABILITIES) {
+    try {
+      await forumRequest(apiKey, "/agents/me/capabilities", {
+        method: "POST",
+        body: JSON.stringify(cap),
+      });
+    } catch (err) {
+      console.warn(`[ClaudeBridge] 能力注册跳过 ${cap.capability}: ${err}`);
+    }
+  }
+  console.log(`[ClaudeBridge] 已注册 ${CLAUDE_CAPABILITIES.length} 项能力`);
 }
 
 /**
@@ -461,14 +526,17 @@ function stripVisibleMentions(content: string, mentions: Mention[]): string {
 }
 
 /**
- * 判断当前消息是否命中本 Agent 的回复资格
+ * 判断当前消息是否命中本 Agent 的回复资格。
+ * discussion 消息优先使用服务端给出的 expectedSpeakerId，
+ * 普通消息才按 mention / replyTargetAgentId 判定。
  */
 function shouldRespondToMessage(message: Message, selfAgentId: string): boolean {
   if (!message) return false;
 
-  if (message.discussion) {
-    if (message.discussion.status !== "active") return false;
-    if (message.discussion.expectedSpeakerId !== selfAgentId) return false;
+  if (message.discussionSessionId || message.discussion) {
+    if (!message.discussion) return false;
+    if (message.discussion.status !== "in_progress" && message.discussion.status !== "open") return false;
+    return message.discussion.expectedSpeakerId === selfAgentId;
   }
 
   if (message.mentions.length > 0) {
@@ -507,22 +575,48 @@ function formatContext(messages: Message[]): string {
     const label = message.senderId?.startsWith("admin:")
       ? `[管理员] ${senderName}`
       : senderName;
+    // 意图标注
+    const intentTags: string[] = [];
+    if (message.intent) {
+      if (message.intent.task_type) intentTags.push(message.intent.task_type);
+      if (message.intent.priority && message.intent.priority !== "normal") intentTags.push(message.intent.priority);
+      if (message.intent.requires_approval) intentTags.push("需审批");
+    }
+    const intentSuffix = intentTags.length > 0 ? `[${intentTags.join(" | ")}]` : "";
     const body = String(message.content || "").replace(/\n/g, "\n  ");
-    return `[${label}]: ${body}`;
+    return `[${label}]${intentSuffix}: ${body}`;
   }).join("\n");
 }
 
 /**
  * 为 Claude Code SDK 构造本轮提示词
+ * @param historyMessages - 频道历史消息上下文
+ * @param triggerMessage - 触发回复的消息
+ * @param selfAgentId - 本 Agent 的 ID，用于查找自身角色定位
  */
-function buildPrompt(historyMessages: Message[], triggerMessage: Message): string {
+function buildPrompt(
+  historyMessages: Message[],
+  triggerMessage: Message,
+  channelPolicy: ChannelPolicy,
+  selfAgentId?: string
+): string {
   const history = formatContext(historyMessages);
   const cleanedRequest = stripVisibleMentions(triggerMessage.content, triggerMessage.mentions) || triggerMessage.content;
   const sections: string[] = [
     "你正在作为 AgentForum 频道中的 Claude Bridge Agent 发言。",
-    "请结合频道上下文，只输出一条准备发回频道的中文正文。",
-    "不要输出协议字段，不要手动添加 @mention，不要解释系统规则。",
+    "请结合频道上下文，生成一条准备发回频道的中文消息，并自行判断是否需要附带结构化 intent。",
+    "不要手动添加 @mention，不要解释系统规则。",
+    buildStructuredReplyInstructions(channelPolicy),
   ];
+
+  // 注入本 Agent 的频道角色定位（从 mentions 或 discussion.participantRoles 中提取）
+  const myMention = selfAgentId ? triggerMessage.mentions.find((m) => m.agentId === selfAgentId) : null;
+  const myTeamRole = myMention?.teamRole
+    ?? triggerMessage.discussion?.participantRoles?.[selfAgentId ?? ""]
+    ?? null;
+  if (myTeamRole) {
+    sections.push(`[角色定位] 你在此频道中的角色定位是「${myTeamRole}」，请以此身份和视角参与对话。`);
+  }
 
   if (triggerMessage.discussion) {
     const participantList = triggerMessage.discussion.participantAgentIds.join(" -> ");
@@ -534,6 +628,21 @@ function buildPrompt(historyMessages: Message[], triggerMessage: Message): strin
         ? "这是本次讨论的最终发言，请自然收束。"
         : `你发言后，系统会自动把下一棒交给 ${triggerMessage.discussion.nextSpeakerId || "下一位参与者"}。`
     );
+
+    // 使用服务端生成的节奏引导指令（已包含角色定位和讨论进度引导）
+    if (triggerMessage.discussion.agentInstruction) {
+      sections.push(triggerMessage.discussion.agentInstruction);
+    }
+  }
+
+  if (triggerMessage.intent) {
+    const intentLines: string[] = ["这条消息附带了结构化意图："];
+    if (triggerMessage.intent.task_type) intentLines.push(`- 任务类型: ${triggerMessage.intent.task_type}`);
+    if (triggerMessage.intent.priority) intentLines.push(`- 优先级: ${triggerMessage.intent.priority}`);
+    if (triggerMessage.intent.requires_approval) intentLines.push("- 需要审批: 是");
+    if (triggerMessage.intent.deadline) intentLines.push(`- 截止时间: ${triggerMessage.intent.deadline}`);
+    if (triggerMessage.intent.tags?.length) intentLines.push(`- 标签: ${triggerMessage.intent.tags.join(", ")}`);
+    sections.push(intentLines.join("\n"), "请在回复时考虑这些元数据的含义。");
   }
 
   if (history) {
@@ -551,6 +660,32 @@ function compactReply(text: string): string {
   const normalized = String(text || "").trim() || "(无输出)";
   if (normalized.length <= MAX_REPLY_CHARS) return normalized;
   return `${normalized.slice(0, MAX_REPLY_CHARS)}\n\n...(输出已截断)`;
+}
+
+/**
+ * 让 Claude 生成符合结构化回复协议的出站消息。
+ */
+async function generateStructuredReply(opts: {
+  channelId: string;
+  prompt: string;
+  channelPolicy: ChannelPolicy;
+  sessionManager: AgentSessionManager;
+  canUseTool: CanUseToolCallback;
+}): Promise<{ content: string; intent: Message["intent"] }> {
+  const { channelId, prompt, channelPolicy, sessionManager, canUseTool } = opts;
+  const firstOutput = await sessionManager.run(channelId, prompt, canUseTool);
+
+  try {
+    return parseStructuredReply(firstOutput, channelPolicy);
+  } catch (error: any) {
+    const repairPrompt = buildStructuredReplyRepairPrompt(error.message, firstOutput);
+    const retryOutput = await sessionManager.run(channelId, repairPrompt, canUseTool);
+    try {
+      return parseStructuredReply(retryOutput, channelPolicy);
+    } catch (retryError: any) {
+      throw new Error(`结构化回复协议重试失败: ${retryError.message}`);
+    }
+  }
 }
 
 // ─── 发消息到 Forum ─────────────────────────────────────────
@@ -571,6 +706,9 @@ async function sendForumMessage(
   }
   if (options.discussionSessionId) {
     body.discussionSessionId = options.discussionSessionId;
+  }
+  if (options.intent) {
+    body.intent = options.intent;
   }
   await forumRequest(apiKey, `/api/v1/channels/${channelId}/messages`, {
     method: "POST",
@@ -623,7 +761,14 @@ class PermissionApprovalManager {
         // 发送权限请求消息到频道
         const sentMessage = await forumRequest(apiKey, `/api/v1/channels/${channelId}/messages`, {
           method: "POST",
-          body: JSON.stringify({ content }),
+          body: JSON.stringify({
+            content,
+            intent: {
+              task_type: "approval_request",
+              priority: "high",
+              requires_approval: true,
+            },
+          }),
         });
 
         const messageId = sentMessage?.id || sentMessage?.message?.id;
@@ -724,9 +869,11 @@ async function respondToMessage(opts: {
   historyMessages: Message[];
   sessionManager: AgentSessionManager;
   approvalManager: PermissionApprovalManager;
+  selfAgentId?: string;
 }): Promise<void> {
-  const { apiKey, channelId, message, historyMessages, sessionManager, approvalManager } = opts;
-  const prompt = buildPrompt(historyMessages, message);
+  const { apiKey, channelId, message, historyMessages, sessionManager, approvalManager, selfAgentId } = opts;
+  const channelPolicy = await fetchChannelPolicy(apiKey, channelId);
+  const prompt = buildPrompt(historyMessages, message, channelPolicy, selfAgentId);
   const routing = buildReplyRouting(message);
 
   // 构造 canUseTool 回调：把权限请求发到 forum 频道，等待用户回复
@@ -735,14 +882,29 @@ async function respondToMessage(opts: {
   };
 
   try {
-    const output = await sessionManager.run(channelId, prompt, canUseTool);
-    const reply = compactReply(output);
-    await sendForumMessage(apiKey, channelId, reply, routing);
+    const structuredReply = await generateStructuredReply({
+      channelId,
+      prompt,
+      channelPolicy,
+      sessionManager,
+      canUseTool,
+    });
+    const reply = compactReply(structuredReply.content);
+    await sendForumMessage(apiKey, channelId, reply, {
+      ...routing,
+      intent: structuredReply.intent ?? undefined,
+    });
     console.log(`[ClaudeBridge] 已回复消息 ${message.id}`);
   } catch (error: any) {
     console.error(`[ClaudeBridge] 处理消息 ${message.id} 失败: ${error.message}`);
     try {
-      await sendForumMessage(apiKey, channelId, `处理失败：${error.message}`, routing);
+      await sendForumMessage(apiKey, channelId, `处理失败：${error.message}`, {
+        ...routing,
+        intent: {
+          task_type: "bug_report",
+          priority: "high",
+        },
+      });
     } catch (sendError: any) {
       console.error(`[ClaudeBridge] 失败消息发送失败: ${sendError.message}`);
     }
@@ -894,6 +1056,7 @@ function connectWS(
       historyMessages: historySnapshot,
       sessionManager,
       approvalManager,
+      selfAgentId,
     })).catch((error: any) => {
       console.error(`[ClaudeBridge] 队列任务失败: ${error.message}`);
     });

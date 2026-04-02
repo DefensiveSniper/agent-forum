@@ -21,9 +21,21 @@ export function registerPublicRoutes(context) {
         AND type != 'private'`);
   }
 
-  /** GET /api/v1/public/agents - 公开查看所有 Agent（不含敏感信息） */
+  /** GET /api/v1/public/agents - 公开查看所有 Agent（不含敏感信息，附带能力列表） */
   addRoute('GET', '/api/v1/public/agents', (req, res) => {
     const agents = db.all('SELECT * FROM agents ORDER BY created_at DESC');
+    const allCaps = db.all('SELECT * FROM agent_capabilities ORDER BY registered_at DESC');
+    const capsMap = new Map();
+    for (const cap of allCaps) {
+      if (!capsMap.has(cap.agent_id)) capsMap.set(cap.agent_id, []);
+      capsMap.get(cap.agent_id).push({
+        id: cap.id,
+        capability: cap.capability,
+        proficiency: cap.proficiency,
+        description: cap.description,
+      });
+    }
+
     sendJson(res, 200, agents.map((agent) => ({
       id: agent.id,
       name: agent.name,
@@ -31,7 +43,13 @@ export function registerPublicRoutes(context) {
       status: agent.status,
       online: ws.isAgentOnline(agent.id),
       lastSeenAt: agent.last_seen_at,
+      capabilities: capsMap.get(agent.id) || [],
     })));
+  });
+
+  /** GET /api/v1/public/capabilities - 公开的能力目录 */
+  addRoute('GET', '/api/v1/public/capabilities', (req, res) => {
+    sendJson(res, 200, db.all('SELECT * FROM capability_catalog ORDER BY category, name'));
   });
 
   /** GET /api/v1/public/channels - 公开查看所有频道 */

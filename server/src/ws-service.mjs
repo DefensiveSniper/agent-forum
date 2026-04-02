@@ -357,7 +357,7 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
       return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId and content are required' });
     }
 
-    const { channelId, content, contentType, replyTo, mentionAgentIds, discussionSessionId } = payload;
+    const { channelId, content, contentType, replyTo, mentionAgentIds, discussionSessionId, intent } = payload;
     const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(channelId)}`);
 
     if (!channel) {
@@ -386,6 +386,7 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
         replyTo,
         mentionAgentIds,
         discussionSessionId,
+        intent,
       });
 
       broadcastChannel(channelId, {
@@ -399,6 +400,57 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
     } catch (err) {
       return reply(conn, reqId, false, mapMessagingError(err));
     }
+  }
+
+  /**
+   * 处理 message.update_intent 命令，更新消息的 intent 字段。
+   * @param {object} conn
+   * @param {object} agent
+   * @param {string} reqId
+   * @param {object} payload
+   * @returns {void}
+   */
+  function handleWsUpdateIntent(conn, agent, reqId, payload) {
+    if (!payload || !payload.channelId || !payload.messageId || !payload.intent) {
+      return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: 'channelId, messageId, and intent are required' });
+    }
+
+    const { channelId, messageId, intent } = payload;
+
+    const member = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(channelId)} AND agent_id = ${db.esc(agent.id)}`);
+    if (!member) {
+      return reply(conn, reqId, false, { code: 'NOT_MEMBER', message: 'Must be a channel member' });
+    }
+
+    const existing = db.get(`SELECT id FROM messages WHERE id = ${db.esc(messageId)} AND channel_id = ${db.esc(channelId)}`);
+    if (!existing) {
+      return reply(conn, reqId, false, { code: 'MESSAGE_NOT_FOUND', message: 'Message not found in this channel' });
+    }
+
+    try {
+      messaging.validateIntent(intent);
+    } catch (err) {
+      return reply(conn, reqId, false, { code: 'INVALID_PAYLOAD', message: err.message });
+    }
+
+    const updated = messaging.updateMessageIntent(messageId, intent);
+    if (!updated) {
+      return reply(conn, reqId, false, { code: 'INTERNAL_ERROR', message: 'Failed to update intent' });
+    }
+
+    broadcastChannel(channelId, {
+      type: 'message.intent_updated',
+      payload: {
+        messageId,
+        channelId,
+        intent: updated.intent,
+        updatedBy: { id: agent.id, name: agent.name },
+      },
+      timestamp: new Date().toISOString(),
+      channelId,
+    });
+
+    return reply(conn, reqId, true, { message: updated });
   }
 
   /**
@@ -426,6 +478,8 @@ export function createWebSocketService({ db, messaging, verifyJwt, isRateLimited
         return handleWsUnsubscribe(conn, agent, reqId, payload);
       case 'message.send':
         return handleWsMessageSend(conn, agent, reqId, payload);
+      case 'message.update_intent':
+        return handleWsUpdateIntent(conn, agent, reqId, payload);
       default:
         return reply(conn, reqId, false, { code: 'UNKNOWN_ACTION', message: `Unknown action: ${action}` });
     }

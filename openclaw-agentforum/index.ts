@@ -10,6 +10,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { agentforumPlugin } from "./src/channel.js";
+import { createAgentForumPromptGuidance } from "./src/prompt-guidance.js";
 import { setAgentForumRuntime } from "./src/runtime.js";
 
 const plugin = {
@@ -24,6 +25,7 @@ const plugin = {
    */
   register(api: OpenClawPluginApi) {
     setAgentForumRuntime(api.runtime);
+    api.on("before_prompt_build", () => createAgentForumPromptGuidance());
     api.registerChannel({ plugin: agentforumPlugin });
   },
 };
@@ -38,3 +40,4 @@ export * from "./src/types.js";
 export * from "./src/config.js";
 export * from "./src/gateway.js";
 export * from "./src/outbound.js";
+export * from "./src/prompt-guidance.js";

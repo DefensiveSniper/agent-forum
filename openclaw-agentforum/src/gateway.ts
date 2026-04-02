@@ -17,6 +17,13 @@
 import WebSocket from "ws";
 import { getAgentForumRuntime } from "./runtime.js";
 import { sendText } from "./outbound.js";
+import {
+  buildStructuredReplyInstructions,
+  buildStructuredReplyRepairPrompt,
+  fetchChannelPolicy,
+  parseStructuredReply,
+} from "./reply-contract.js";
+import type { StructuredAgentReply } from "./reply-contract.js";
 import type {
   GatewayContext,
   AgentForumWSEvent,
@@ -92,12 +99,25 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
   /**
    * 判断消息是否需要触发 AI 回复
-   * 只有当消息 @mention 了本 Agent 或 reply 目标是本 Agent 时才触发
+   * discussion 消息优先走服务端指定的 expectedSpeakerId；
+   * 非 discussion 消息才按 @mention / reply 目标判断。
    *
    * @param message - 消息对象
    * @returns 是否应触发回复
    */
   const shouldRespond = (message: MessageNewPayload["message"]): boolean => {
+    // discussion 消息只允许由服务端指定的 expectedSpeakerId 接力
+    if (message.discussion_session_id || message.discussion) {
+      if (!message.discussion) return false;
+      if (
+        message.discussion.status !== "in_progress"
+        && message.discussion.status !== "open"
+      ) {
+        return false;
+      }
+      return message.discussion.expectedSpeakerId === account.agentId;
+    }
+
     // 被 reply 指向时触发
     if (message.reply_target_agent_id === account.agentId) return true;
 
@@ -119,7 +139,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     replyToMessageId: string;
   } | null => {
     const discussion = message.discussion;
-    if (!discussion || discussion.status !== "active") return null;
+    if (!discussion || (discussion.status !== "in_progress" && discussion.status !== "open")) return null;
     if (discussion.expectedSpeakerId !== account.agentId) return null;
 
     return {
@@ -131,7 +151,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
   /**
    * 处理收到的 message.new 事件
-   * 所有消息都会进入上下文，但只有被 @mention 或 reply 时才触发 AI 回复
+   * 所有消息都会进入上下文，但只有命中当前 Agent 的回复资格时才触发 AI 回复
    *
    * @param payload - message.new 事件的 payload
    */
@@ -149,9 +169,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     // 提取线性讨论上下文（如果有）
     const discussionCtx = extractDiscussionContext(message);
 
-    // 只有被 @mention 或 reply 时才触发 AI 回复
+    // 只有命中当前 Agent 的回复资格时才触发 AI 回复
     if (!shouldRespond(message)) {
-      log?.debug?.(`[af] 消息未 @mention 或 reply 本 Agent，跳过回复`);
+      log?.debug?.(`[af] 消息未命中当前 Agent 的回复资格，跳过回复`);
       return;
     }
 
@@ -217,83 +237,175 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         throw fmtErr;
       }
 
-      // AI 实际看到的消息内容
-      const agentBody = `[AgentForum] 来自 ${sender.name}: ${userContent}`;
-
-      // 构建最终的入站上下文
-      let ctxPayload;
+      // 获取当前频道策略，作为模型判断 intent 的约束输入
+      let channelPolicy;
       try {
-        ctxPayload = runtime.channel.reply.finalizeInboundContext({
-          Body: body,
-          BodyForAgent: agentBody,
-          RawBody: userContent,
-          CommandBody: userContent,
-          From: fromAddress,
-          To: toAddress,
-          SessionKey: route.sessionKey,
-          AccountId: route.accountId,
-          ChatType: "group",
-          SenderId: sender.id,
-          SenderName: sender.name,
-          Provider: "agentforum",
-          Surface: "agentforum",
-          MessageSid: message.id,
-          Timestamp: Date.now(),
-          OriginatingChannel: "agentforum",
-        });
-        log?.info(`[af] finalizeInboundContext 成功`);
-      } catch (ctxErr) {
-        log?.error(`[af] finalizeInboundContext 失败: ${String(ctxErr)}`);
-        throw ctxErr;
+        channelPolicy = await fetchChannelPolicy(
+          account.forumUrl,
+          channelId,
+          account.apiKey,
+        );
+        log?.info(
+          `[af] channel policy 获取成功: require_intent=${channelPolicy.require_intent}`
+        );
+      } catch (policyErr) {
+        log?.error(`[af] fetchChannelPolicy 失败: ${String(policyErr)}`);
+        throw policyErr;
       }
 
-      // 分发给 OpenClaw AI 处理，并通过 deliver 回调发送回复
-      log?.info(`[af] 开始 dispatchReply...`);
-      await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-        ctx: ctxPayload,
-        cfg,
-        dispatcherOptions: {
-          deliver: async (
-            deliverPayload: {
-              text?: string;
-              mediaUrl?: string;
-              mediaUrls?: string[];
-            },
-            info: { kind: string }
-          ) => {
-            log?.info(`[af] deliver 回调触发, kind=${info.kind}, hasText=${Boolean(deliverPayload.text)}`);
-            // 处理 AI 的最终文本回复（kind 可能是 "block" 或 "final"），忽略 tool 类型
-            if (info.kind !== "tool" && deliverPayload.text) {
-              // 讨论模式下回复到讨论的最新消息并传递 sessionId；普通模式回复原始消息
-              const replyToId = discussionCtx?.replyToMessageId ?? message.id;
-              const sessionId = discussionCtx?.discussionSessionId;
+      // AI 实际看到的消息内容（包含意图标注、角色定位和讨论引导）
+      const intentTag = message.intent
+        ? (() => {
+            const parts: string[] = [];
+            if (message.intent.task_type) parts.push(`任务: ${message.intent.task_type}`);
+            if (message.intent.priority && message.intent.priority !== 'normal') parts.push(`优先级: ${message.intent.priority}`);
+            if (message.intent.requires_approval) parts.push('需审批');
+            return parts.length > 0 ? ` (${parts.join(', ')})` : '';
+          })()
+        : '';
+
+      // 从 mentions 或 discussion.participantRoles 中提取本 Agent 的频道角色定位
+      const myMention = message.mentions?.find((m) => m.agentId === account.agentId);
+      const myTeamRole = myMention?.teamRole
+        ?? (message.discussion as any)?.participantRoles?.[account.agentId]
+        ?? null;
+
+      // 从讨论快照中提取服务端生成的节奏引导指令
+      const agentInstruction = (message.discussion as any)?.agentInstruction ?? null;
+      const baseAgentSections = [
+        `[AgentForum] 来自 ${sender.name}${intentTag}: ${userContent}`,
+        myTeamRole
+          ? `[角色定位] 你在此频道中的角色定位是「${myTeamRole}」，请以此身份和视角参与对话。`
+          : null,
+        agentInstruction,
+        buildStructuredReplyInstructions(channelPolicy),
+      ].filter((item): item is string => Boolean(item && item.trim().length > 0));
+
+      /**
+       * 构造发给 OpenClaw 模型的当前轮输入。
+       * @param repairPrompt - 可选的协议修正提示
+       * @returns 组合后的 Agent 输入文本
+       */
+      const buildAgentBody = (repairPrompt?: string): string => {
+        const sections = [...baseAgentSections];
+        if (repairPrompt) sections.push(repairPrompt);
+        return sections.join("\n\n");
+      };
+
+      /**
+       * 基于 Agent 侧可见文本构造 OpenClaw 入站上下文。
+       * @param agentBody - 发给模型的最终文本
+       * @returns OpenClaw runtime 需要的上下文对象
+       */
+      const buildContextPayload = (agentBody: string) => {
+        try {
+          const ctxPayload = runtime.channel.reply.finalizeInboundContext({
+            Body: body,
+            BodyForAgent: agentBody,
+            RawBody: userContent,
+            CommandBody: userContent,
+            From: fromAddress,
+            To: toAddress,
+            SessionKey: route.sessionKey,
+            AccountId: route.accountId,
+            ChatType: "group",
+            SenderId: sender.id,
+            SenderName: sender.name,
+            Provider: "agentforum",
+            Surface: "agentforum",
+            MessageSid: message.id,
+            Timestamp: Date.now(),
+            OriginatingChannel: "agentforum",
+          });
+          log?.info(`[af] finalizeInboundContext 成功`);
+          return ctxPayload;
+        } catch (ctxErr) {
+          log?.error(`[af] finalizeInboundContext 失败: ${String(ctxErr)}`);
+          throw ctxErr;
+        }
+      };
+
+      /**
+       * 触发一次 OpenClaw 回复生成，并收集最终文本输出。
+       * @param agentBody - 发给模型的最终文本
+       * @returns 模型最后一次非工具文本输出
+       */
+      const collectStructuredReply = async (agentBody: string): Promise<string> => {
+        let finalText = "";
+        log?.info(`[af] 开始 dispatchReply...`);
+        await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+          ctx: buildContextPayload(agentBody),
+          cfg,
+          dispatcherOptions: {
+            deliver: async (
+              deliverPayload: {
+                text?: string;
+                mediaUrl?: string;
+                mediaUrls?: string[];
+              },
+              info: { kind: string }
+            ) => {
               log?.info(
-                `[af] 回复到频道 ${channelId}: ${deliverPayload.text.slice(0, 50)}...${sessionId ? ` (discussion=${sessionId})` : ""}`
+                `[af] deliver 回调触发, kind=${info.kind}, hasText=${Boolean(deliverPayload.text)}`
               );
-              const result = await sendText(
-                account.forumUrl,
-                channelId,
-                deliverPayload.text,
-                account.apiKey,
-                replyToId,
-                sessionId
-              );
-              if (result.error) {
-                log?.error(`[af] 发送失败: ${result.error}`);
-              } else {
-                log?.info(`[af] 发送成功: messageId=${result.id}`);
+              if (info.kind !== "tool" && deliverPayload.text) {
+                finalText = deliverPayload.text;
               }
-            }
+            },
+            onError: (err: unknown) => {
+              log?.error(`[af] dispatcherOptions.onError: ${String(err)}`);
+            },
           },
-          onError: (err: unknown) => {
-            log?.error(`[af] dispatcherOptions.onError: ${String(err)}`);
-          },
-        },
-        // 禁用流式块合并：收集完所有块后一次性 deliver
-        // AgentForum 走 REST API 发消息，没有流式推送能力
-        replyOptions: { disableBlockStreaming: true },
-      });
-      log?.info(`[af] dispatchReply 完成`);
+          replyOptions: { disableBlockStreaming: true },
+        });
+        log?.info(`[af] dispatchReply 完成`);
+
+        if (!finalText.trim()) {
+          throw new Error("OpenClaw 未返回文本回复");
+        }
+        return finalText;
+      };
+
+      const firstReply = await collectStructuredReply(buildAgentBody());
+      let structuredReply: StructuredAgentReply;
+      try {
+        structuredReply = parseStructuredReply(firstReply, channelPolicy);
+      } catch (replyErr) {
+        const repairPrompt = buildStructuredReplyRepairPrompt(
+          replyErr instanceof Error ? replyErr.message : String(replyErr),
+          firstReply,
+        );
+        const retriedReply = await collectStructuredReply(buildAgentBody(repairPrompt));
+        try {
+          structuredReply = parseStructuredReply(retriedReply, channelPolicy);
+        } catch (retryErr) {
+          throw new Error(
+            `结构化回复协议重试失败: ${
+              retryErr instanceof Error ? retryErr.message : String(retryErr)
+            }`
+          );
+        }
+      }
+
+      // 讨论模式下回复到讨论的最新消息并传递 sessionId；普通模式回复原始消息
+      const replyToId = discussionCtx?.replyToMessageId ?? message.id;
+      const sessionId = discussionCtx?.discussionSessionId;
+      log?.info(
+        `[af] 回复到频道 ${channelId}: ${structuredReply.content.slice(0, 50)}...${sessionId ? ` (discussion=${sessionId})` : ""}`
+      );
+      const result = await sendText(
+        account.forumUrl,
+        channelId,
+        structuredReply.content,
+        account.apiKey,
+        replyToId,
+        sessionId,
+        structuredReply.intent ?? undefined,
+      );
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      log?.info(`[af] 发送成功: messageId=${result.id}`);
     } catch (err) {
       log?.error(`[af] 处理消息失败: ${String(err)}`);
       // 打印完整堆栈

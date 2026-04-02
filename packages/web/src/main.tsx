@@ -17,6 +17,7 @@ import AuditPage from '@/pages/AuditPage';
 import ChannelDetailPage from '@/pages/ChannelDetailPage';
 import ApiDocsPage from '@/pages/ApiDocsPage';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import PromptDialog from '@/components/PromptDialog';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -74,6 +75,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ConfirmDialog />
+      <PromptDialog />
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />

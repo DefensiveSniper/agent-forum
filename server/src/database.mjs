@@ -194,6 +194,90 @@ export function createDatabase({ config, skillDocPath }) {
     ensureColumnExists('messages', 'discussion_state', 'discussion_state TEXT');
     exec('CREATE INDEX IF NOT EXISTS idx_messages_discussion_session ON messages(discussion_session_id);');
 
+    // ── Phase 1: 能力注册表 ──
+    exec(`
+      CREATE TABLE IF NOT EXISTS capability_catalog (
+        id TEXT PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        display_name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT,
+        created_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS agent_capabilities (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        proficiency TEXT DEFAULT 'standard',
+        description TEXT,
+        registered_at TEXT NOT NULL,
+        UNIQUE(agent_id, capability)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_capabilities_capability ON agent_capabilities(capability);
+      CREATE INDEX IF NOT EXISTS idx_agent_capabilities_agent ON agent_capabilities(agent_id);
+    `);
+    ensureColumnExists('channel_members', 'team_role', 'team_role TEXT DEFAULT NULL');
+
+    // ── Phase 2: 消息意图字段 ──
+    ensureColumnExists('messages', 'intent', 'intent TEXT DEFAULT NULL');
+
+    // ── Phase 3: 讨论状态机 ──
+    ensureColumnExists('discussion_sessions', 'requires_approval', 'requires_approval INT DEFAULT 0');
+    ensureColumnExists('discussion_sessions', 'approval_agent_id', 'approval_agent_id TEXT DEFAULT NULL');
+    ensureColumnExists('discussion_sessions', 'resolution', 'resolution TEXT DEFAULT NULL');
+    ensureColumnExists('discussion_sessions', 'cancelled_reason', 'cancelled_reason TEXT DEFAULT NULL');
+
+    exec(`
+      CREATE TABLE IF NOT EXISTS discussion_transitions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        triggered_by TEXT NOT NULL,
+        triggered_by_name TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_discussion_transitions_session ON discussion_transitions(session_id);
+    `);
+
+    // 数据迁移：旧状态值 → 新状态值
+    exec(`
+      UPDATE discussion_sessions SET status = 'in_progress' WHERE status = 'active';
+      UPDATE discussion_sessions SET status = 'done' WHERE status = 'completed';
+      UPDATE discussion_sessions SET status = 'cancelled' WHERE status = 'interrupted';
+    `);
+
+    // ── Phase 4: 频道级沙箱隔离 ──
+    exec(`
+      CREATE TABLE IF NOT EXISTS channel_policies (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT UNIQUE NOT NULL,
+        isolation_level TEXT DEFAULT 'standard',
+        require_intent INT DEFAULT 0,
+        allowed_task_types TEXT DEFAULT NULL,
+        default_requires_approval INT DEFAULT 0,
+        auto_discussion_mode TEXT DEFAULT NULL,
+        required_capabilities TEXT DEFAULT NULL,
+        max_concurrent_discussions INT DEFAULT 5,
+        message_rate_limit INT DEFAULT 60,
+        updated_at TEXT,
+        updated_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS channel_audit_log (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL,
+        details TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_channel_audit_log_channel ON channel_audit_log(channel_id);
+      CREATE INDEX IF NOT EXISTS idx_channel_audit_log_created ON channel_audit_log(created_at);
+    `);
+
     seedSkillDoc('agent-forum', skillDocPath);
     console.log('✅ Database initialized');
   }

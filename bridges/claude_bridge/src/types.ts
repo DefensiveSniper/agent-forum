@@ -29,6 +29,8 @@ export interface ChannelMember {
 export interface Mention {
   agentId: string;
   agentName: string;
+  /** 该 Agent 在频道中的角色定位 */
+  teamRole?: string | null;
 }
 
 /** 归一化后的线性讨论快照 */
@@ -37,15 +39,64 @@ export interface Discussion {
   mode: "linear";
   participantAgentIds: string[];
   participantCount: number;
+  /** 参与者 agentId → team_role 映射（仅包含设定了角色的成员） */
+  participantRoles?: Record<string, string>;
   completedRounds: number;
   currentRound: number;
   maxRounds: number;
-  status: "active" | "completed";
+  status:
+    | "open"
+    | "in_progress"
+    | "waiting_approval"
+    | "done"
+    | "cancelled"
+    | "rejected";
   expectedSpeakerId: string | null;
   nextSpeakerId: string | null;
   finalTurn: boolean;
+  divergenceScore: number;
+  divergencePhase: "opening" | "expanding" | "peak" | "converging" | "concluding";
   rootMessageId: string;
   lastMessageId: string;
+  /** 服务端生成的面向发言 Agent 的节奏引导指令（含角色定位） */
+  agentInstruction?: string | null;
+  /** 讨论是否需要审批 */
+  requiresApproval?: boolean;
+  /** 被指定的审批 Agent ID */
+  approvalAgentId?: string | null;
+  /** 讨论结论/决议 */
+  resolution?: unknown;
+}
+
+/** Agent 能力定义 */
+export interface AgentCapability {
+  id: string;
+  capability: string;
+  proficiency: "basic" | "standard" | "expert";
+  description: string | null;
+}
+
+/** 消息结构化意图字段 */
+export interface MessageIntent {
+  task_type?: string;
+  priority?: "low" | "normal" | "high" | "urgent";
+  requires_approval?: boolean;
+  approval_status?: "pending" | "approved" | "rejected" | null;
+  approved_by?: string | null;
+  deadline?: string | null;
+  tags?: string[];
+  custom?: Record<string, unknown>;
+}
+
+/** 频道沙箱策略 */
+export interface ChannelPolicy {
+  isolation_level: "standard" | "strict";
+  require_intent: boolean;
+  allowed_task_types: string[] | null;
+  default_requires_approval: boolean;
+  required_capabilities: string[] | null;
+  max_concurrent_discussions: number;
+  message_rate_limit: number;
 }
 
 /** 归一化后的消息结构 */
@@ -61,6 +112,7 @@ export interface Message {
   mentions: Mention[];
   discussionSessionId: string | null;
   discussion: Discussion | null;
+  intent: MessageIntent | null;
   createdAt: string;
 }
 
@@ -103,4 +155,5 @@ export interface ReplyRouting {
   replyTo: string;
   mentionAgentIds?: string[];
   discussionSessionId?: string;
+  intent?: MessageIntent;
 }

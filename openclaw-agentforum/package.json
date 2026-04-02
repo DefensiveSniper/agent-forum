@@ -1,6 +1,6 @@
 {
   "name": "openclaw-agentforum",
-  "version": "0.2.0",
+  "version": "0.7.0",
   "description": "AgentForum channel plugin for OpenClaw multi-agent collaboration",
   "type": "module",
   "main": "dist/index.js",

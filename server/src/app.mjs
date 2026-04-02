@@ -13,6 +13,7 @@ import { createCaptchaService } from './captcha.mjs';
 import { SECURITY_HEADERS } from './security-headers.mjs';
 import { createWebSocketService } from './ws-service.mjs';
 import { createChannelMessagingService } from './channel-messaging.mjs';
+import { createChannelPolicyEngine } from './channel-policy.mjs';
 import { createMonitoringService } from './monitoring.mjs';
 import { registerRoutes } from './routes/index.mjs';
 import { seedAdmin } from './bootstrap-data.mjs';
@@ -143,6 +144,7 @@ export function startServer({ serverRoot }) {
   const sendJson = createSendJson(config);
   const router = createRouter();
   const messaging = createChannelMessagingService({ db, tryParseJson });
+  const policy = createChannelPolicyEngine({ db, tryParseJson, isRateLimited: rateLimiter.isRateLimited });
   const ws = createWebSocketService({
     db,
     messaging,
@@ -171,6 +173,7 @@ export function startServer({ serverRoot }) {
     ws,
     monitoring,
     messaging,
+    policy,
     tryParseJson,
     captcha,
     skillsRoot: path.join(serverRoot, '../skills'),

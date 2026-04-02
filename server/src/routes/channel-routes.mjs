@@ -6,7 +6,7 @@ import { buildCursorPage } from '../pagination.mjs';
  * @param {object} context
  */
 export function registerChannelRoutes(context) {
-  const { router, auth, db, sendJson, ws, messaging } = context;
+  const { router, auth, db, sendJson, ws, messaging, policy } = context;
   const { addRoute } = router;
   const { authAgent } = auth;
 
@@ -171,12 +171,20 @@ export function registerChannelRoutes(context) {
     const existing = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
     if (existing) return sendJson(res, 409, { error: 'Already a member' });
 
+    // 频道能力要求校验
+    if (policy) {
+      const capCheck = policy.validateMemberCapabilities(req.params.id, req.agent.id);
+      if (!capCheck.ok) {
+        return sendJson(res, 403, { error: `Agent 缺少频道所需能力: ${capCheck.missing.join(', ')}`, missingCapabilities: capCheck.missing });
+      }
+    }
+
     const count = db.get(`SELECT COUNT(*) as cnt FROM channel_members WHERE channel_id = ${db.esc(req.params.id)}`);
     if (count && count.cnt >= channel.max_members) return sendJson(res, 409, { error: 'Channel is full' });
 
     const now = new Date().toISOString();
     db.exec(`INSERT INTO channel_members (channel_id, agent_id, role, joined_at)
-      VALUES (${db.esc(req.params.id)}, ${db.esc(req.agent.id)}, 'member', ${db.esc(now)})`);
+      Values (${db.esc(req.params.id)}, ${db.esc(req.agent.id)}, 'member', ${db.esc(now)})`);
 
     ws.broadcastChannel(req.params.id, {
       type: 'member.joined',
@@ -250,6 +258,31 @@ export function registerChannelRoutes(context) {
       WHERE cm.channel_id = ${db.esc(req.params.id)}`));
   });
 
+  /** GET /api/v1/channels/:id/policy - 获取当前频道的有效策略快照 */
+  addRoute('GET', '/api/v1/channels/:id/policy', authAgent, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)}
+        AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    const effectivePolicy = policy
+      ? policy.getEffectivePolicy(req.params.id)
+      : {
+          isolation_level: 'standard',
+          require_intent: false,
+          allowed_task_types: null,
+          default_requires_approval: false,
+          required_capabilities: null,
+          max_concurrent_discussions: 5,
+          message_rate_limit: 60,
+        };
+
+    sendJson(res, 200, effectivePolicy);
+  });
+
   /** POST /api/v1/channels/:id/messages - 发送消息（归档频道禁止写入） */
   addRoute('POST', '/api/v1/channels/:id/messages', authAgent, (req, res) => {
     const channel = db.get(`SELECT is_archived FROM channels WHERE id = ${db.esc(req.params.id)}`);
@@ -259,8 +292,14 @@ export function registerChannelRoutes(context) {
     const member = db.get(`SELECT agent_id FROM channel_members WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
     if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
 
-    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId } = req.body;
+    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId, intent } = req.body;
     if (!content) return sendJson(res, 400, { error: 'content is required' });
+
+    // 频道策略校验
+    if (policy) {
+      const check = policy.validateMessage(req.params.id, req.agent.id, { intent });
+      if (!check.ok) return sendJson(res, 403, { error: { code: check.code, message: check.message, policy: check.policy } });
+    }
 
     try {
       const { message } = messaging.createChannelMessage({
@@ -272,6 +311,7 @@ export function registerChannelRoutes(context) {
         replyTo,
         mentionAgentIds,
         discussionSessionId,
+        intent,
       });
 
       ws.broadcastChannel(req.params.id, {
@@ -294,7 +334,12 @@ export function registerChannelRoutes(context) {
 
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
+    const intentTaskType = req.query.intent_task_type || null;
+    const intentPriority = req.query.intent_priority || null;
+    const intentRequiresApproval = req.query.intent_requires_approval || null;
+
     let sql = `SELECT m.*, a.name AS sender_name,
+      cm_sender.team_role AS sender_team_role,
       rm.sender_id AS reply_sender_id,
       ra.name AS reply_sender_name,
       rm.content AS reply_content
@@ -302,8 +347,19 @@ export function registerChannelRoutes(context) {
       LEFT JOIN messages rm ON rm.id = m.reply_to
       LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON a.id = m.sender_id
+      LEFT JOIN channel_members cm_sender ON cm_sender.channel_id = m.channel_id AND cm_sender.agent_id = m.sender_id
       WHERE m.channel_id = ${db.esc(req.params.id)}`;
     if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
+    // intent 字段过滤（使用 JSON 提取）
+    if (intentTaskType) {
+      sql += ` AND json_extract(m.intent, '$.task_type') = ${db.esc(intentTaskType)}`;
+    }
+    if (intentPriority) {
+      sql += ` AND json_extract(m.intent, '$.priority') = ${db.esc(intentPriority)}`;
+    }
+    if (intentRequiresApproval === 'true') {
+      sql += ` AND json_extract(m.intent, '$.requires_approval') = 1`;
+    }
     sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
 
     sendJson(res, 200, buildMessagePage(db.all(sql), limit));
@@ -320,6 +376,7 @@ export function registerChannelRoutes(context) {
     if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
 
     const message = db.get(`SELECT m.*, a.name AS sender_name,
+      cm_sender.team_role AS sender_team_role,
       rm.sender_id AS reply_sender_id,
       ra.name AS reply_sender_name,
       rm.content AS reply_content
@@ -327,9 +384,180 @@ export function registerChannelRoutes(context) {
       LEFT JOIN messages rm ON rm.id = m.reply_to
       LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON a.id = m.sender_id
+      LEFT JOIN channel_members cm_sender ON cm_sender.channel_id = m.channel_id AND cm_sender.agent_id = m.sender_id
       WHERE m.id = ${db.esc(req.params.msgId)}
         AND m.channel_id = ${db.esc(req.params.id)}`);
     if (!message) return sendJson(res, 404, { error: 'Message not found' });
     sendJson(res, 200, messaging.formatMessage(message));
+  });
+
+  /** PATCH /api/v1/channels/:id/messages/:msgId/intent - 更新消息 intent（如审批状态） */
+  addRoute('PATCH', '/api/v1/channels/:id/messages/:msgId/intent', authAgent, (req, res) => {
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)}
+        AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    const existing = db.get(`SELECT id, sender_id, intent FROM messages
+      WHERE id = ${db.esc(req.params.msgId)}
+        AND channel_id = ${db.esc(req.params.id)}`);
+    if (!existing) return sendJson(res, 404, { error: 'Message not found' });
+
+    const patch = req.body;
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      return sendJson(res, 400, { error: 'Request body must be a JSON object' });
+    }
+
+    try {
+      // 校验 patch 中的字段
+      messaging.validateIntent(patch);
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+
+    const updated = messaging.updateMessageIntent(req.params.msgId, patch);
+    if (!updated) return sendJson(res, 500, { error: 'Failed to update intent' });
+
+    ws.broadcastChannel(req.params.id, {
+      type: 'message.intent_updated',
+      payload: {
+        messageId: req.params.msgId,
+        channelId: req.params.id,
+        intent: updated.intent,
+        updatedBy: { id: req.agent.id, name: req.agent.name },
+      },
+      timestamp: new Date().toISOString(),
+      channelId: req.params.id,
+    });
+
+    sendJson(res, 200, updated);
+  });
+
+  // ── 讨论状态机 Agent 侧端点 ──
+
+  /** GET /api/v1/channels/:id/discussions/:sessionId - 获取讨论详情 */
+  addRoute('GET', '/api/v1/channels/:id/discussions/:sessionId', authAgent, (req, res) => {
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    const session = messaging.getDiscussionSession(req.params.sessionId);
+    if (!session || session.channel_id !== req.params.id) {
+      return sendJson(res, 404, { error: 'Discussion session not found' });
+    }
+
+    const discussion = messaging.buildDiscussionStateSnapshot(session);
+    const transitions = messaging.getDiscussionTransitions(req.params.sessionId);
+    sendJson(res, 200, { discussion, transitions });
+  });
+
+  /** POST /api/v1/channels/:id/discussions/:sessionId/submit-approval - Agent 提交审批请求 */
+  addRoute('POST', '/api/v1/channels/:id/discussions/:sessionId/submit-approval', authAgent, (req, res) => {
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    try {
+      const result = messaging.submitForApproval({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy: req.agent.id,
+        triggeredByName: req.agent.name,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy: req.agent.id,
+          triggeredByName: req.agent.name,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/channels/:id/discussions/:sessionId/approve - 被授权 Agent 批准讨论 */
+  addRoute('POST', '/api/v1/channels/:id/discussions/:sessionId/approve', authAgent, (req, res) => {
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    const { resolution } = req.body || {};
+
+    try {
+      const result = messaging.approveDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy: req.agent.id,
+        triggeredByName: req.agent.name,
+        resolution: resolution || null,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy: req.agent.id,
+          triggeredByName: req.agent.name,
+          resolution: resolution || null,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/channels/:id/discussions/:sessionId/reject - 被授权 Agent 拒绝讨论 */
+  addRoute('POST', '/api/v1/channels/:id/discussions/:sessionId/reject', authAgent, (req, res) => {
+    const member = db.get(`SELECT agent_id FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.agent.id)}`);
+    if (!member) return sendJson(res, 403, { error: 'Must be a channel member' });
+
+    const { reason } = req.body || {};
+
+    try {
+      const result = messaging.rejectDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy: req.agent.id,
+        triggeredByName: req.agent.name,
+        reason: reason || null,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy: req.agent.id,
+          triggeredByName: req.agent.name,
+          reason: reason || null,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
   });
 }

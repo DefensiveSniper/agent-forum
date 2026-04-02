@@ -7,7 +7,7 @@ import { parseCookies } from '../http-utils.mjs';
  * @param {object} context
  */
 export function registerAdminRoutes(context) {
-  const { config, router, auth, db, sendJson, formatAgent, ws, security, messaging, monitoring, captcha, rateLimiter } = context;
+  const { config, router, auth, db, sendJson, formatAgent, ws, security, messaging, monitoring, captcha, rateLimiter, policy } = context;
   const { addRoute } = router;
   const { authAdmin } = auth;
   const VALID_CHANNEL_TYPES = new Set(['public', 'private', 'broadcast']);
@@ -638,6 +638,7 @@ export function registerAdminRoutes(context) {
     const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
     const cursor = req.query.cursor;
     let sql = `SELECT m.*, a.name AS sender_name,
+      cm_sender.team_role AS sender_team_role,
       rm.sender_id AS reply_sender_id,
       ra.name AS reply_sender_name,
       rm.content AS reply_content
@@ -645,6 +646,7 @@ export function registerAdminRoutes(context) {
       LEFT JOIN messages rm ON rm.id = m.reply_to
       LEFT JOIN agents ra ON ra.id = rm.sender_id
       LEFT JOIN agents a ON m.sender_id = a.id
+      LEFT JOIN channel_members cm_sender ON cm_sender.channel_id = m.channel_id AND cm_sender.agent_id = m.sender_id
       WHERE m.channel_id = ${db.esc(req.params.id)}`;
     if (cursor) sql += ` AND m.created_at < ${db.esc(cursor)}`;
     sql += ` ORDER BY m.created_at DESC LIMIT ${limit + 1}`;
@@ -658,7 +660,7 @@ export function registerAdminRoutes(context) {
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
     if (channel.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
 
-    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId } = req.body;
+    const { content, contentType, replyTo, mentionAgentIds, discussionSessionId, intent } = req.body;
     if (!content) return sendJson(res, 400, { error: 'content is required' });
 
     const senderId = `admin:${req.admin.username}`;
@@ -674,6 +676,7 @@ export function registerAdminRoutes(context) {
         replyTo,
         mentionAgentIds,
         discussionSessionId,
+        intent,
       });
 
       ws.broadcastChannel(req.params.id, {
@@ -695,7 +698,7 @@ export function registerAdminRoutes(context) {
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
     if (channel.is_archived) return sendJson(res, 403, { error: 'Channel is archived' });
 
-    const { content, participantAgentIds, maxRounds } = req.body || {};
+    const { content, participantAgentIds, maxRounds, requiresApproval, approvalAgentId, intent } = req.body || {};
     if (!content) return sendJson(res, 400, { error: 'content is required' });
 
     const senderId = `admin:${req.admin.username}`;
@@ -710,6 +713,9 @@ export function registerAdminRoutes(context) {
         participantAgentIds,
         maxRounds,
         isAgentOnline: ws.isAgentOnline,
+        requiresApproval: !!requiresApproval,
+        approvalAgentId: approvalAgentId || null,
+        intent,
       });
 
       ws.broadcastChannel(req.params.id, {
@@ -725,13 +731,14 @@ export function registerAdminRoutes(context) {
     }
   });
 
-  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/interrupt - 管理员中断活跃的线性讨论 */
+  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/interrupt - 管理员中断讨论 */
   addRoute('POST', '/api/v1/admin/channels/:id/discussions/:sessionId/interrupt', authAdmin, (req, res) => {
     const channel = db.get(`SELECT id, is_archived FROM channels WHERE id = ${db.esc(req.params.id)}`);
     if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
 
     const senderId = `admin:${req.admin.username}`;
     const senderName = `[Admin] ${req.admin.username}`;
+    const { reason } = req.body || {};
 
     try {
       const { message, discussion } = messaging.interruptLinearDiscussion({
@@ -739,6 +746,7 @@ export function registerAdminRoutes(context) {
         channelId: req.params.id,
         senderId,
         senderName,
+        reason: reason || null,
       });
 
       ws.broadcastChannel(req.params.id, {
@@ -748,10 +756,152 @@ export function registerAdminRoutes(context) {
         channelId: req.params.id,
       });
 
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: discussion.status === 'cancelled' ? 'in_progress' : discussion.status,
+          toStatus: 'cancelled',
+          triggeredBy: senderId,
+          triggeredByName: senderName,
+          reason: reason || null,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
       sendJson(res, 200, { message, discussion });
     } catch (err) {
       sendMessagingError(res, err);
     }
+  });
+
+  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/approve - 管理员审批通过讨论 */
+  addRoute('POST', '/api/v1/admin/channels/:id/discussions/:sessionId/approve', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const triggeredBy = `admin:${req.admin.username}`;
+    const triggeredByName = `[Admin] ${req.admin.username}`;
+    const { resolution } = req.body || {};
+
+    try {
+      const result = messaging.approveDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy,
+        triggeredByName,
+        resolution: resolution || null,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy,
+          triggeredByName,
+          resolution: resolution || null,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/reject - 管理员拒绝讨论 */
+  addRoute('POST', '/api/v1/admin/channels/:id/discussions/:sessionId/reject', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const triggeredBy = `admin:${req.admin.username}`;
+    const triggeredByName = `[Admin] ${req.admin.username}`;
+    const { reason } = req.body || {};
+
+    try {
+      const result = messaging.rejectDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy,
+        triggeredByName,
+        reason: reason || null,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy,
+          triggeredByName,
+          reason: reason || null,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** POST /api/v1/admin/channels/:id/discussions/:sessionId/reopen - 管理员重新开启被拒绝的讨论 */
+  addRoute('POST', '/api/v1/admin/channels/:id/discussions/:sessionId/reopen', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const triggeredBy = `admin:${req.admin.username}`;
+    const triggeredByName = `[Admin] ${req.admin.username}`;
+    const { additionalRounds } = req.body || {};
+
+    try {
+      const result = messaging.reopenDiscussion({
+        sessionId: req.params.sessionId,
+        channelId: req.params.id,
+        triggeredBy,
+        triggeredByName,
+        additionalRounds: additionalRounds || 1,
+      });
+
+      ws.broadcastChannel(req.params.id, {
+        type: 'discussion.status_changed',
+        payload: {
+          sessionId: req.params.sessionId,
+          channelId: req.params.id,
+          fromStatus: result.transition.from,
+          toStatus: result.transition.to,
+          triggeredBy,
+          triggeredByName,
+          additionalRounds: additionalRounds || 1,
+        },
+        timestamp: new Date().toISOString(),
+        channelId: req.params.id,
+      });
+
+      sendJson(res, 200, { discussion: result.discussion });
+    } catch (err) {
+      sendMessagingError(res, err);
+    }
+  });
+
+  /** GET /api/v1/admin/channels/:id/discussions/:sessionId/transitions - 获取讨论状态转换历史 */
+  addRoute('GET', '/api/v1/admin/channels/:id/discussions/:sessionId/transitions', authAdmin, (req, res) => {
+    const session = messaging.getDiscussionSession(req.params.sessionId);
+    if (!session) return sendJson(res, 404, { error: 'Discussion session not found' });
+    if (session.channel_id !== req.params.id) return sendJson(res, 404, { error: 'Discussion session not found in this channel' });
+
+    const transitions = messaging.getDiscussionTransitions(req.params.sessionId);
+    sendJson(res, 200, transitions);
   });
 
   /** DELETE /api/v1/admin/channels/:id - 管理员彻底删除频道 */
@@ -786,5 +936,216 @@ export function registerAdminRoutes(context) {
     ws.disconnectAgent(req.params.id, 'API Key rotated');
 
     sendJson(res, 200, { apiKey: newKey });
+  });
+
+  // ────── 能力注册表管理（Admin） ──────
+
+  const VALID_PROFICIENCIES = new Set(['basic', 'standard', 'expert']);
+  const VALID_CATEGORIES = new Set(['development', 'content', 'analysis', 'operations', 'communication', 'other']);
+
+  /** POST /api/v1/admin/capabilities - 新增能力到目录 */
+  addRoute('POST', '/api/v1/admin/capabilities', authAdmin, (req, res) => {
+    const { name, displayName, category, description } = req.body;
+    if (!name || !displayName || !category) {
+      return sendJson(res, 400, { error: 'name, displayName, and category are required' });
+    }
+    if (!VALID_CATEGORIES.has(category)) {
+      return sendJson(res, 400, { error: `category must be one of: ${[...VALID_CATEGORIES].join(', ')}` });
+    }
+    if (db.get(`SELECT id FROM capability_catalog WHERE name = ${db.esc(name)}`)) {
+      return sendJson(res, 409, { error: 'Capability name already exists' });
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    db.exec(`INSERT INTO capability_catalog (id, name, display_name, category, description, created_at, created_by)
+      VALUES (${db.esc(id)}, ${db.esc(name)}, ${db.esc(displayName)}, ${db.esc(category)}, ${db.esc(description || null)}, ${db.esc(now)}, ${db.esc(req.admin.username)})`);
+
+    sendJson(res, 201, db.get(`SELECT * FROM capability_catalog WHERE id = ${db.esc(id)}`));
+  });
+
+  /** GET /api/v1/admin/capabilities - 列出能力目录 */
+  addRoute('GET', '/api/v1/admin/capabilities', authAdmin, (req, res) => {
+    const catalog = db.all('SELECT * FROM capability_catalog ORDER BY category, name');
+    const counts = db.all('SELECT capability, COUNT(*) AS agent_count FROM agent_capabilities GROUP BY capability');
+    const countMap = new Map(counts.map((r) => [r.capability, r.agent_count]));
+
+    sendJson(res, 200, catalog.map((c) => ({ ...c, agent_count: countMap.get(c.name) || 0 })));
+  });
+
+  /** PATCH /api/v1/admin/capabilities/:id - 编辑能力定义 */
+  addRoute('PATCH', '/api/v1/admin/capabilities/:id', authAdmin, (req, res) => {
+    const cap = db.get(`SELECT * FROM capability_catalog WHERE id = ${db.esc(req.params.id)}`);
+    if (!cap) return sendJson(res, 404, { error: 'Capability not found' });
+
+    const { displayName, category, description } = req.body;
+    const sets = [];
+    if (displayName !== undefined) sets.push(`display_name = ${db.esc(displayName)}`);
+    if (category !== undefined) {
+      if (!VALID_CATEGORIES.has(category)) {
+        return sendJson(res, 400, { error: `category must be one of: ${[...VALID_CATEGORIES].join(', ')}` });
+      }
+      sets.push(`category = ${db.esc(category)}`);
+    }
+    if (description !== undefined) sets.push(`description = ${db.esc(description)}`);
+
+    if (sets.length > 0) {
+      db.exec(`UPDATE capability_catalog SET ${sets.join(', ')} WHERE id = ${db.esc(req.params.id)}`);
+    }
+    sendJson(res, 200, db.get(`SELECT * FROM capability_catalog WHERE id = ${db.esc(req.params.id)}`));
+  });
+
+  /** DELETE /api/v1/admin/capabilities/:id - 删除能力定义 */
+  addRoute('DELETE', '/api/v1/admin/capabilities/:id', authAdmin, (req, res) => {
+    const cap = db.get(`SELECT * FROM capability_catalog WHERE id = ${db.esc(req.params.id)}`);
+    if (!cap) return sendJson(res, 404, { error: 'Capability not found' });
+
+    db.exec(`DELETE FROM agent_capabilities WHERE capability = ${db.esc(cap.name)}`);
+    db.exec(`DELETE FROM capability_catalog WHERE id = ${db.esc(req.params.id)}`);
+    res.writeHead(204).end();
+  });
+
+  /** POST /api/v1/admin/agents/:id/capabilities - 管理员为 Agent 分配能力 */
+  addRoute('POST', '/api/v1/admin/agents/:id/capabilities', authAdmin, (req, res) => {
+    const agent = db.get(`SELECT id FROM agents WHERE id = ${db.esc(req.params.id)}`);
+    if (!agent) return sendJson(res, 404, { error: 'Agent not found' });
+
+    const { capability, proficiency, description } = req.body;
+    if (!capability) return sendJson(res, 400, { error: 'capability is required' });
+
+    const prof = proficiency || 'standard';
+    if (!VALID_PROFICIENCIES.has(prof)) {
+      return sendJson(res, 400, { error: `proficiency must be one of: ${[...VALID_PROFICIENCIES].join(', ')}` });
+    }
+
+    const existing = db.get(`SELECT id FROM agent_capabilities
+      WHERE agent_id = ${db.esc(req.params.id)} AND capability = ${db.esc(capability)}`);
+    const now = new Date().toISOString();
+
+    if (existing) {
+      db.exec(`UPDATE agent_capabilities
+        SET proficiency = ${db.esc(prof)}, description = ${db.esc(description || null)}, registered_at = ${db.esc(now)}
+        WHERE id = ${db.esc(existing.id)}`);
+      return sendJson(res, 200, db.get(`SELECT * FROM agent_capabilities WHERE id = ${db.esc(existing.id)}`));
+    }
+
+    const id = crypto.randomUUID();
+    db.exec(`INSERT INTO agent_capabilities (id, agent_id, capability, proficiency, description, registered_at)
+      VALUES (${db.esc(id)}, ${db.esc(req.params.id)}, ${db.esc(capability)}, ${db.esc(prof)}, ${db.esc(description || null)}, ${db.esc(now)})`);
+    sendJson(res, 201, db.get(`SELECT * FROM agent_capabilities WHERE id = ${db.esc(id)}`));
+  });
+
+  /** GET /api/v1/admin/agents/:id/capabilities - 查看 Agent 能力 */
+  addRoute('GET', '/api/v1/admin/agents/:id/capabilities', authAdmin, (req, res) => {
+    sendJson(res, 200, db.all(`SELECT * FROM agent_capabilities
+      WHERE agent_id = ${db.esc(req.params.id)} ORDER BY registered_at DESC`));
+  });
+
+  /** DELETE /api/v1/admin/agents/:id/capabilities/:capId - 移除 Agent 能力 */
+  addRoute('DELETE', '/api/v1/admin/agents/:id/capabilities/:capId', authAdmin, (req, res) => {
+    const cap = db.get(`SELECT id FROM agent_capabilities
+      WHERE id = ${db.esc(req.params.capId)} AND agent_id = ${db.esc(req.params.id)}`);
+    if (!cap) return sendJson(res, 404, { error: 'Capability not found' });
+
+    db.exec(`DELETE FROM agent_capabilities WHERE id = ${db.esc(req.params.capId)}`);
+    res.writeHead(204).end();
+  });
+
+  /** PATCH /api/v1/admin/channels/:id/members/:agentId/team-role - 设置频道内 Agent 角色定位 */
+  addRoute('PATCH', '/api/v1/admin/channels/:id/members/:agentId/team-role', authAdmin, (req, res) => {
+    const member = db.get(`SELECT * FROM channel_members
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.params.agentId)}`);
+    if (!member) return sendJson(res, 404, { error: 'Member not found in this channel' });
+
+    const { teamRole } = req.body;
+    db.exec(`UPDATE channel_members SET team_role = ${db.esc(teamRole || null)}
+      WHERE channel_id = ${db.esc(req.params.id)} AND agent_id = ${db.esc(req.params.agentId)}`);
+
+    sendJson(res, 200, { channelId: req.params.id, agentId: req.params.agentId, teamRole: teamRole || null });
+  });
+
+  // ── Phase 4: 频道策略管理 ──
+
+  /** GET /api/v1/admin/channels/:id/policy - 获取频道策略 */
+  addRoute('GET', '/api/v1/admin/channels/:id/policy', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const p = policy.getPolicy(req.params.id);
+    sendJson(res, 200, p || { channelId: req.params.id, message: 'No policy set (using defaults)' });
+  });
+
+  /** PUT /api/v1/admin/channels/:id/policy - 设置/更新频道策略 */
+  addRoute('PUT', '/api/v1/admin/channels/:id/policy', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const updatedBy = `admin:${req.admin.username}`;
+    const result = policy.upsertPolicy(req.params.id, req.body || {}, updatedBy);
+
+    policy.logAudit({
+      channelId: req.params.id,
+      action: 'policy.changed',
+      actorId: updatedBy,
+      actorName: `[Admin] ${req.admin.username}`,
+      details: req.body,
+    });
+
+    ws.broadcastChannel(req.params.id, {
+      type: 'channel.policy_changed',
+      payload: { channelId: req.params.id, policy: result },
+      timestamp: new Date().toISOString(),
+      channelId: req.params.id,
+    });
+
+    sendJson(res, 200, result);
+  });
+
+  /** DELETE /api/v1/admin/channels/:id/policy - 重置频道策略为默认 */
+  addRoute('DELETE', '/api/v1/admin/channels/:id/policy', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    policy.deletePolicy(req.params.id);
+
+    const updatedBy = `admin:${req.admin.username}`;
+    policy.logAudit({
+      channelId: req.params.id,
+      action: 'policy.reset',
+      actorId: updatedBy,
+      actorName: `[Admin] ${req.admin.username}`,
+    });
+
+    ws.broadcastChannel(req.params.id, {
+      type: 'channel.policy_changed',
+      payload: { channelId: req.params.id, policy: null },
+      timestamp: new Date().toISOString(),
+      channelId: req.params.id,
+    });
+
+    sendJson(res, 200, { message: 'Policy reset to defaults' });
+  });
+
+  /** GET /api/v1/admin/channels/:id/audit-log - 获取频道审计日志 */
+  addRoute('GET', '/api/v1/admin/channels/:id/audit-log', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const limit = Math.min(Number.parseInt(req.query.limit || '50', 10) || 50, 100);
+    const offset = Number.parseInt(req.query.offset || '0', 10) || 0;
+    const action = req.query.action || null;
+
+    const logs = policy.getAuditLog(req.params.id, { limit, offset, action });
+    sendJson(res, 200, logs);
+  });
+
+  /** POST /api/v1/admin/channels/:id/auto-assemble - 按频道所需能力自动推荐 Agent */
+  addRoute('POST', '/api/v1/admin/channels/:id/auto-assemble', authAdmin, (req, res) => {
+    const channel = db.get(`SELECT id FROM channels WHERE id = ${db.esc(req.params.id)}`);
+    if (!channel) return sendJson(res, 404, { error: 'Channel not found' });
+
+    const { capabilities, minProficiency } = req.body || {};
+    const recommendations = policy.autoAssemble(req.params.id, { capabilities, minProficiency });
+    sendJson(res, 200, recommendations);
   });
 }
