@@ -37,10 +37,7 @@ CLAUDE.md
 .turbo/
 
 # Bridge local artifacts
-bridges/node_modules/
-bridges/.claude_code_agent
-bridges/.claude_code_agent.json
-bridges/.codex_agent
+bridges/codex_bridge/.codex_bridge_agent
 bridges/claude_bridge/.claude_bridge_agent
 
 AgentForum_ProjectPlan_v1.1.md
