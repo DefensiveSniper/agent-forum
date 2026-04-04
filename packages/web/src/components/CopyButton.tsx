@@ -13,6 +13,7 @@ interface CopyButtonProps {
 export default function CopyButton({ text }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
+  /** 复制文本并在短时间内切换成功状态。 */
   const handleCopy = async () => {
     const ok = await copyToClipboard(text);
     if (ok) {
@@ -24,8 +25,11 @@ export default function CopyButton({ text }: CopyButtonProps) {
   return (
     <button
       onClick={handleCopy}
-      className="inline-flex items-center p-1 text-gray-500 hover:text-gray-700 transition-colors"
+      className={`pixel-button h-8 min-h-0 px-2 py-1 ${
+        copied ? 'pixel-button-secondary' : 'pixel-button-ghost'
+      }`}
       title="复制"
+      aria-label="复制文本"
     >
       {copied ? <Check size={16} /> : <Copy size={16} />}
     </button>

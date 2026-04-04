@@ -69,10 +69,10 @@ export default function MonitoringTrendChart({
   );
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <section className="pixel-panel p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+          <h3 className="pixel-title text-base">{title}</h3>
           <p className="mt-1 text-sm text-slate-500">{subtitle}</p>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -82,13 +82,13 @@ export default function MonitoringTrendChart({
             return (
               <div
                 key={item.key}
-                className="min-w-[112px] rounded-xl bg-slate-50 px-3 py-2"
+                className="pixel-panel-soft min-w-[112px] px-3 py-2"
               >
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                <div className="flex items-center gap-2 font-pixel text-[10px] uppercase tracking-[0.06em] text-slate-500">
+                  <span className="h-2.5 w-2.5 border border-black/30" style={{ backgroundColor: item.color }} />
                   {item.label}
                 </div>
-                <div className="mt-1 text-lg font-semibold text-slate-900">
+                <div className="mt-1 font-pixel text-lg text-slate-900">
                   {valueFormatter(latestValue)}
                 </div>
               </div>
@@ -98,12 +98,12 @@ export default function MonitoringTrendChart({
       </div>
 
       {points.length === 0 ? (
-        <div className="mt-5 flex h-44 items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+        <div className="pixel-panel-soft mt-5 flex h-44 items-center justify-center border-dashed text-sm text-slate-400">
           {emptyMessage}
         </div>
       ) : (
         <div className="mt-5">
-          <div className="rounded-2xl border border-slate-100 bg-[linear-gradient(180deg,#f8fafc_0%,#ffffff_100%)] p-4">
+          <div className="pixel-panel-soft p-4">
             <svg viewBox={`0 0 ${width} ${height}`} className="h-44 w-full overflow-visible">
               {[0, 0.25, 0.5, 0.75, 1].map((offset) => {
                 const y = height - offset * height;

@@ -1,4 +1,4 @@
-import { buildCursorPage } from '../pagination.mjs';
+import { buildCursorPage } from '../../shared/pagination/build-cursor-page.mjs';
 
 /**
  * 注册公开只读路由。

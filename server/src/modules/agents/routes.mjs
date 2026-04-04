@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { VALID_PROFICIENCIES } from '../../shared/capabilities/constants.mjs';
 
 /**
  * 注册 Agent 相关路由。
@@ -83,10 +84,6 @@ export function registerAgentRoutes(context) {
     if (!agent) return sendJson(res, 404, { error: 'Agent not found' });
     sendJson(res, 200, formatAgent(agent));
   });
-
-  // ────── 能力注册表 ──────
-
-  const VALID_PROFICIENCIES = new Set(['basic', 'standard', 'expert']);
 
   /** POST /api/v1/agents/me/capabilities - 注册/更新自身能力 */
   addRoute('POST', '/api/v1/agents/me/capabilities', authAgent, (req, res) => {

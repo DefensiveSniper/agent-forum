@@ -2,21 +2,23 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
-import { createConfig } from './config.mjs';
-import { createDatabase } from './database.mjs';
-import { createSecurity } from './security.mjs';
-import { createRateLimiter } from './rate-limiter.mjs';
-import { createRouter } from './router.mjs';
-import { MIME_TYPES, createFormatAgent, createSendJson, tryParseJson, buildResponseHeaders } from './http-utils.mjs';
-import { createAuth } from './auth.mjs';
-import { createCaptchaService } from './captcha.mjs';
-import { SECURITY_HEADERS } from './security-headers.mjs';
-import { createWebSocketService } from './ws-service.mjs';
-import { createChannelMessagingService } from './channel-messaging.mjs';
-import { createChannelPolicyEngine } from './channel-policy.mjs';
-import { createMonitoringService } from './monitoring.mjs';
-import { registerRoutes } from './routes/index.mjs';
-import { seedAdmin } from './bootstrap-data.mjs';
+import { seedAdmin } from '../bootstrap/seed-admin.mjs';
+import { createAuth } from '../infrastructure/auth/create-auth.mjs';
+import { createCaptchaService } from '../infrastructure/captcha/create-captcha-service.mjs';
+import { createConfig } from '../infrastructure/config/create-config.mjs';
+import { createDatabase } from '../infrastructure/database/create-database.mjs';
+import { createRouter } from '../infrastructure/http/create-router.mjs';
+import { createMonitoringService } from '../infrastructure/monitoring/create-monitoring-service.mjs';
+import { createRateLimiter } from '../infrastructure/rate-limiter/create-rate-limiter.mjs';
+import { createSecurity } from '../infrastructure/security/create-security.mjs';
+import { SECURITY_HEADERS } from '../infrastructure/security/security-headers.mjs';
+import { createWebSocketService } from '../infrastructure/websocket/create-websocket-service.mjs';
+import { createFormatAgent } from '../modules/agents/format-agent.mjs';
+import { createChannelMessagingService } from '../modules/channels/services/messaging-service.mjs';
+import { createChannelPolicyEngine } from '../modules/channels/services/policy-service.mjs';
+import { registerModules } from '../modules/index.mjs';
+import { MIME_TYPES, buildResponseHeaders, createSendJson } from '../shared/http/response.mjs';
+import { tryParseJson } from '../shared/utils/json.mjs';
 
 /**
  * 执行路由中间件链。
@@ -69,7 +71,6 @@ function handlePreflight(req, res, config) {
 
 /**
  * 计算当前请求的限流键和值。
- * 读取请求使用更宽松的配额，避免页面轮询和跳转把公开列表打成空白。
  * @param {object} req
  * @param {string} ip
  * @returns {{ key: string, maxReqs: number, windowMs: number }}
@@ -115,13 +116,13 @@ function serveStaticFile({ pathname, res, config }) {
  */
 function printStartupBanner(config) {
   console.log('');
-  console.log('╔══════════════════════════════════════╗');
-  console.log('║       AgentForum Server Started       ║');
-  console.log('╠══════════════════════════════════════╣');
+  console.log('╔═════════════════════════════════════════════════════╗');
+  console.log('║              AgentForum Server Started              ║');
+  console.log('╠═════════════════════════════════════════════════════╣');
   console.log(`║  REST API:  http://localhost:${config.PORT}/api/v1  ║`);
-  console.log(`║  WebSocket: ws://localhost:${config.PORT}/ws       ║`);
-  console.log(`║  Admin UI:  http://localhost:${config.PORT}        ║`);
-  console.log('╚══════════════════════════════════════╝');
+  console.log(`║  WebSocket: ws://localhost:${config.PORT}/ws        ║`);
+  console.log(`║  Admin UI:  http://localhost:${config.PORT}         ║`);
+  console.log('╚═════════════════════════════════════════════════════╝');
   console.log('');
   console.log(`👤 Admin: ${config.ADMIN_INIT_USERNAME} / ${config.ADMIN_INIT_PASSWORD}`);
   console.log('');
@@ -161,7 +162,7 @@ export function startServer({ serverRoot }) {
   });
   const captcha = createCaptchaService();
 
-  registerRoutes({
+  registerModules({
     config,
     db,
     security,
@@ -218,6 +219,7 @@ export function startServer({ serverRoot }) {
       req.params = matched.params;
       req.query = query;
       req.body = body;
+
       await runHandlers(matched.route.handlers, req, res, sendJson);
       return;
     }
@@ -253,7 +255,6 @@ export function startServer({ serverRoot }) {
 
   /**
    * 处理服务监听阶段的启动错误。
-   * 遇到端口占用时输出明确提示，并清理已初始化资源。
    * @param {NodeJS.ErrnoException} err
    */
   function handleServerError(err) {

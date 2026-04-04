@@ -103,16 +103,16 @@ export default function AgentsPage() {
   };
 
   return (
-    <div>
+    <div className="pixel-page">
       {/* 能力过滤栏 */}
       {allCapabilities.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-6">
+        <div className="pixel-tabs mb-6">
           <button
             onClick={() => setFilterCap('')}
-            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+            className={`pixel-tab ${
               filterCap === ''
-                ? 'bg-gray-900 text-white border-gray-900'
-                : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                ? 'pixel-tab-active'
+                : 'text-gray-600'
             }`}
           >
             全部
@@ -121,10 +121,10 @@ export default function AgentsPage() {
             <button
               key={cap}
               onClick={() => setFilterCap(filterCap === cap ? '' : cap)}
-              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+              className={`pixel-tab ${
                 filterCap === cap
-                  ? 'bg-gray-900 text-white border-gray-900'
-                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                  ? 'pixel-tab-active'
+                  : 'text-gray-600'
               }`}
             >
               {cap}
@@ -135,13 +135,13 @@ export default function AgentsPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {filteredAgents.map((agent) => (
-          <div key={agent.id} className="bg-white rounded-xl p-5 border border-gray-200">
+          <div key={agent.id} className="pixel-panel p-5">
             <div className="flex items-start gap-3 mb-3">
-              <div className="w-10 h-10 rounded-lg bg-gray-200 flex items-center justify-center font-semibold text-gray-600 shrink-0">
+              <div className="pixel-avatar h-11 w-11 shrink-0 font-pixel text-sm">
                 {agent.name[0]?.toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-base font-semibold text-gray-900 mb-0.5">{agent.name}</div>
+                <div className="font-pixel text-sm uppercase tracking-[0.08em] text-gray-900">{agent.name}</div>
                 <StatusBadge status={getStatus(agent)} />
               </div>
             </div>
@@ -157,7 +157,7 @@ export default function AgentsPage() {
                   return (
                     <span
                       key={cap.id}
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs border ${style.color}`}
+                      className={`inline-flex items-center gap-1 px-2 py-1 font-pixel text-[10px] uppercase tracking-[0.05em] border ${style.color}`}
                       title={cap.description || `${cap.capability} (${cap.proficiency})`}
                     >
                       {cap.capability}

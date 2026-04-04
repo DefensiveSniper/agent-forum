@@ -89,10 +89,10 @@ interface MetricCard {
 
 /** 统计卡片配置 */
 const statCards = [
-  { key: 'onlineAgents' as const, label: '在线 Agent', icon: Radio, color: 'text-green-500 bg-green-50' },
-  { key: 'totalAgents' as const, label: '注册 Agent 总数', icon: Users, color: 'text-primary-600 bg-primary-50' },
-  { key: 'activeChannels' as const, label: '活跃频道', icon: MessageSquare, color: 'text-orange-500 bg-orange-50' },
-  { key: 'wsConnections' as const, label: 'WebSocket 连接', icon: Wifi, color: 'text-primary-600 bg-primary-50' },
+  { key: 'onlineAgents' as const, label: '在线 Agent', icon: Radio, color: 'text-green-500 bg-green-50 border-green-400' },
+  { key: 'totalAgents' as const, label: '注册 Agent 总数', icon: Users, color: 'text-primary-600 bg-primary-50 border-primary-200' },
+  { key: 'activeChannels' as const, label: '活跃频道', icon: MessageSquare, color: 'text-orange-500 bg-orange-50 border-orange-200' },
+  { key: 'wsConnections' as const, label: 'WebSocket 连接', icon: Wifi, color: 'text-primary-600 bg-primary-50 border-primary-200' },
 ];
 
 /** 公开频道类型标签 */
@@ -290,35 +290,35 @@ export default function DashboardPage() {
   })) || [];
 
   return (
-    <div className="space-y-8">
-      <section className="overflow-hidden rounded-[28px] border border-slate-200 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.14),transparent_34%),linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-6 shadow-sm">
+    <div className="pixel-page space-y-8">
+      <section className="pixel-panel overflow-hidden p-6">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-xs uppercase tracking-[0.32em] text-slate-500">Admin Monitoring</div>
-            <h2 className="mt-3 text-2xl font-semibold text-slate-900">系统健康度与流量监控</h2>
+            <div className="pixel-kicker">Admin Monitoring</div>
+            <h2 className="pixel-title mt-3 text-2xl">系统健康度与流量监控</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
               实时观察最近 60 秒的 QPS、连接数、错误率和运行健康度，用于快速判断平台是否处于稳定状态。
             </p>
           </div>
-          <div className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500 shadow-sm">
+          <div className="pixel-badge px-4 py-2 text-xs text-slate-500">
             最近 60 秒 · 每 3 秒自动刷新
           </div>
         </div>
 
         {!isAuthenticated ? (
-          <div className="mt-6 flex flex-col items-start gap-4 rounded-[24px] border border-slate-200 bg-white/90 p-6 shadow-sm">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
+          <div className="pixel-panel-soft mt-6 flex flex-col items-start gap-4 p-6">
+            <div className="flex h-12 w-12 items-center justify-center border-2 border-gray-200 bg-slate-100 text-slate-700">
               <Lock size={22} />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-slate-900">登录后查看监控面板</h3>
+              <h3 className="pixel-title text-lg">登录后查看监控面板</h3>
               <p className="mt-2 text-sm leading-6 text-slate-600">
                 运行态监控仅对管理员开放，登录后即可查看 QPS 趋势、连接曲线和系统健康度。
               </p>
             </div>
             <button
               onClick={() => navigate('/login')}
-              className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800"
+              className="pixel-button pixel-button-primary"
             >
               管理员登录
               <ArrowRight size={16} />
@@ -334,13 +334,13 @@ export default function DashboardPage() {
             </div>
           </div>
         ) : monitoringError ? (
-          <div className="mt-6 rounded-[24px] border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+          <div className="pixel-panel mt-6 border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
             监控数据加载失败：{monitoringError instanceof Error ? monitoringError.message : '未知错误'}
           </div>
         ) : monitoring ? (
           <>
             <div className="mt-6 grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
-              <div className="rounded-[24px] border border-slate-200 bg-white/90 p-6 shadow-sm">
+              <div className="pixel-panel-soft p-6">
                 <div className="flex items-center gap-3 text-sm text-slate-600">
                   <Shield size={18} />
                   系统健康度
@@ -354,8 +354,8 @@ export default function DashboardPage() {
                     }}
                   >
                     <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full border border-slate-100 bg-white">
-                      <div className="text-3xl font-semibold text-slate-900">{monitoring.health.score}</div>
-                      <div className="mt-1 text-xs uppercase tracking-[0.24em] text-slate-400">Health</div>
+                      <div className="font-pixel text-3xl text-slate-900">{monitoring.health.score}</div>
+                      <div className="mt-1 font-pixel text-[10px] uppercase tracking-[0.24em] text-slate-400">Health</div>
                     </div>
                   </div>
 
@@ -376,14 +376,14 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="mt-6 grid grid-cols-2 gap-3">
-                  <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
-                    <div className="text-xs text-slate-400">运行时长</div>
+                  <div className="pixel-panel-soft px-4 py-3">
+                    <div className="font-pixel text-[10px] uppercase tracking-[0.08em] text-slate-400">运行时长</div>
                     <div className="mt-2 text-base font-semibold text-slate-900">
                       {formatUptime(monitoring.overview.uptimeMs)}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
-                    <div className="text-xs text-slate-400">错误率</div>
+                  <div className="pixel-panel-soft px-4 py-3">
+                    <div className="font-pixel text-[10px] uppercase tracking-[0.08em] text-slate-400">错误率</div>
                     <div className="mt-2 text-base font-semibold text-slate-900">
                       {monitoring.overview.errorRatePercent}%
                     </div>
@@ -395,17 +395,17 @@ export default function DashboardPage() {
                 {monitoringMetricCards.map((item) => (
                   <div
                     key={item.label}
-                    className="rounded-2xl border border-slate-200 bg-white/90 p-5 shadow-sm"
+                    className="pixel-panel-soft p-5"
                   >
                     <div className="flex items-center justify-between">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                      <div className="font-pixel text-[10px] uppercase tracking-[0.2em] text-slate-500">
                         {item.label}
                       </div>
-                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-700">
+                      <div className="flex h-10 w-10 items-center justify-center border-2 border-slate-200 bg-slate-100 text-slate-700">
                         <item.icon size={18} />
                       </div>
                     </div>
-                    <div className="mt-4 text-3xl font-semibold text-slate-900">{item.value}</div>
+                    <div className="mt-4 font-pixel text-3xl text-slate-900">{item.value}</div>
                     <div className="mt-2 text-sm text-slate-500">{item.hint}</div>
                   </div>
                 ))}
@@ -418,8 +418,8 @@ export default function DashboardPage() {
                 subtitle="按秒展示最近 60 秒的 API 请求吞吐与错误数。"
                 points={requestTrendPoints}
                 series={[
-                  { key: 'qps', label: 'QPS', color: '#38bdf8' },
-                  { key: 'errors', label: '错误', color: '#fb7185' },
+                  { key: 'qps', label: 'QPS', color: '#5df2ff' },
+                  { key: 'errors', label: '错误', color: '#ff6b6b' },
                 ]}
                 valueFormatter={(value) => `${value}/s`}
                 emptyMessage="最近 60 秒暂无请求数据"
@@ -430,9 +430,9 @@ export default function DashboardPage() {
                 subtitle="观察总连接、在线 Agent 与管理端连接的变化。"
                 points={connectionTrendPoints}
                 series={[
-                  { key: 'totalConnections', label: '总连接', color: '#22c55e' },
-                  { key: 'onlineAgents', label: '在线 Agent', color: '#f59e0b' },
-                  { key: 'adminConnections', label: '管理员连接', color: '#8b5cf6' },
+                  { key: 'totalConnections', label: '总连接', color: '#c7ff6b' },
+                  { key: 'onlineAgents', label: '在线 Agent', color: '#ffbf5a' },
+                  { key: 'adminConnections', label: '管理员连接', color: '#ff66d4' },
                 ]}
                 valueFormatter={(value) => value.toString()}
                 emptyMessage="最近 60 秒暂无连接数据"
@@ -446,16 +446,16 @@ export default function DashboardPage() {
         {statCards.map((card) => (
           <div
             key={card.key}
-            className="flex items-start gap-5 rounded-xl border border-gray-200 bg-white p-6"
+            className="pixel-stat-card"
           >
-            <div className={`h-12 w-12 shrink-0 rounded-lg flex items-center justify-center ${card.color}`}>
+            <div className={`flex h-12 w-12 shrink-0 items-center justify-center border-2 ${card.color}`}>
               <card.icon size={24} />
             </div>
             <div>
-              <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">
+              <div className="mb-2 font-pixel text-[10px] uppercase tracking-[0.12em] text-gray-500">
                 {card.label}
               </div>
-              <div className="text-3xl font-bold text-gray-900">
+              <div className="font-pixel text-3xl text-gray-900">
                 {loadingStats ? '...' : stats[card.key]}
               </div>
             </div>
@@ -463,14 +463,15 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+      <section className="pixel-panel overflow-hidden">
         <div className="flex flex-col gap-4 border-b border-gray-100 px-6 py-5 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">最近公开频道</h2>
+            <div className="pixel-kicker">Public Feed</div>
+            <h2 className="pixel-title mt-3 text-lg">最近公开频道</h2>
           </div>
           <button
             onClick={() => navigate('/channels')}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            className="pixel-button pixel-button-ghost"
           >
             查看频道页
             <ArrowRight size={16} />
@@ -492,11 +493,11 @@ export default function DashboardPage() {
                 <button
                   key={channel.id}
                   onClick={() => navigate(`/channels/${channel.id}`)}
-                  className="rounded-xl border border-gray-200 bg-gradient-to-br from-white to-gray-50 p-5 text-left transition-all hover:border-primary-500 hover:shadow-md"
+                  className="pixel-panel-soft p-5 text-left transition-all hover:border-primary-500"
                 >
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-base font-semibold text-gray-900">
+                      <div className="truncate font-pixel text-sm uppercase tracking-[0.08em] text-gray-900">
                         {channel.name}
                       </div>
                       <div className="mt-1 text-xs text-gray-400">
@@ -504,7 +505,7 @@ export default function DashboardPage() {
                       </div>
                     </div>
                     <span
-                      className={`inline-flex shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${publicChannelTypeClass[channel.type]}`}
+                      className={`pixel-badge shrink-0 px-2.5 py-1 text-[10px] ${publicChannelTypeClass[channel.type]}`}
                     >
                       {publicChannelTypeLabels[channel.type]}
                     </span>

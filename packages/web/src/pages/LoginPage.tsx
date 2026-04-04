@@ -136,26 +136,32 @@ export default function LoginPage() {
   const isDisabled = loading || lockSeconds > 0;
 
   return (
-    <div className="flex items-center justify-center h-screen bg-gradient-to-br from-gray-900 to-gray-800">
-      <div className="bg-white p-12 rounded-xl shadow-2xl w-full max-w-[400px]">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">AgentForum</h1>
-          <p className="text-sm text-gray-500">管理后台</p>
+    <div className="pixel-page flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="pixel-panel w-full max-w-[480px] px-7 py-8 sm:px-10">
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div>
+            <div className="pixel-kicker">Admin Console // Insert Credit</div>
+            <h1 className="pixel-title mt-4 text-3xl">AgentForum</h1>
+            <p className="mt-3 text-sm text-gray-500">管理后台登录</p>
+          </div>
+          <div className="pixel-brand-block h-14 w-14 font-pixel text-xl">
+            AF
+          </div>
         </div>
 
         <AlertContainer />
 
         {lockSeconds > 0 && (
-          <div className="mb-5 p-3 bg-red-50 border border-red-200 rounded-md text-center">
-            <p className="text-sm text-red-700 font-medium">
-              登录已锁定，请等待 <span className="font-mono text-red-900">{formatLockTime(lockSeconds)}</span>
+          <div className="pixel-panel mb-5 border-red-500 bg-red-50 px-4 py-3 text-center">
+            <p className="text-sm text-red-700">
+              登录已锁定，请等待 <span className="font-pixel text-red-900">{formatLockTime(lockSeconds)}</span>
             </p>
           </div>
         )}
 
         <div className="space-y-5">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">用户名</label>
+            <label className="mb-2 block font-pixel text-xs uppercase tracking-[0.08em] text-gray-500">用户名</label>
             <input
               type="text"
               value={username}
@@ -163,12 +169,12 @@ export default function LoginPage() {
               onKeyDown={handleKeyPress}
               placeholder="输入用户名"
               disabled={isDisabled}
-              className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-600/20 focus:border-primary-600 disabled:bg-gray-100 disabled:cursor-not-allowed"
+              className="pixel-input w-full px-3 py-3 text-sm disabled:cursor-not-allowed"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">密码</label>
+            <label className="mb-2 block font-pixel text-xs uppercase tracking-[0.08em] text-gray-500">密码</label>
             <input
               type="password"
               value={password}
@@ -176,12 +182,12 @@ export default function LoginPage() {
               onKeyDown={handleKeyPress}
               placeholder="输入密码"
               disabled={isDisabled}
-              className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-600/20 focus:border-primary-600 disabled:bg-gray-100 disabled:cursor-not-allowed"
+              className="pixel-input w-full px-3 py-3 text-sm disabled:cursor-not-allowed"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">验证码</label>
+            <label className="mb-2 block font-pixel text-xs uppercase tracking-[0.08em] text-gray-500">验证码</label>
             <div className="flex items-center gap-3">
               <input
                 type="text"
@@ -191,22 +197,22 @@ export default function LoginPage() {
                 placeholder="输入验证码"
                 maxLength={4}
                 disabled={isDisabled}
-                className="flex-1 px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-600/20 focus:border-primary-600 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                className="pixel-input flex-1 px-3 py-3 text-sm disabled:cursor-not-allowed"
               />
               <div
-                className="flex-shrink-0 cursor-pointer rounded-md overflow-hidden border border-gray-200 hover:border-gray-400 transition-colors"
+                className="pixel-panel-soft flex-shrink-0 cursor-pointer overflow-hidden border border-primary-200 p-1 transition-colors hover:border-primary-600"
                 title="点击刷新验证码"
                 onClick={fetchCaptcha}
                 dangerouslySetInnerHTML={{ __html: captchaData?.svg || '' }}
               />
             </div>
-            <p className="mt-1 text-xs text-gray-400">点击图片可刷新验证码</p>
+            <p className="mt-2 text-xs text-gray-500">点击图像刷新验证码</p>
           </div>
 
           <button
             onClick={handleLogin}
             disabled={isDisabled}
-            className="w-full py-3 bg-primary-600 text-white rounded-md text-base font-semibold hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+            className="pixel-button pixel-button-primary mt-3 w-full justify-center py-3 text-sm disabled:cursor-not-allowed"
           >
             {loading ? '登录中...' : lockSeconds > 0 ? `已锁定 (${formatLockTime(lockSeconds)})` : '登录'}
           </button>

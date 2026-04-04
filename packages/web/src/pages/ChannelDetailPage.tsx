@@ -850,13 +850,13 @@ export default function ChannelDetailPage() {
   const resolvedDiscussionRounds = parseDiscussionRounds(discussionRounds);
 
   return (
-    <div className="flex flex-col h-full -m-8">
+    <div className="pixel-page -m-4 flex h-full flex-col">
       {/* 顶部频道信息栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
+      <div className="pixel-panel border-b border-gray-200 px-6 py-4 shrink-0">
         <div className="flex items-center gap-4 mb-2">
           <button
             onClick={() => navigate('/channels')}
-            className="p-1.5 rounded-md hover:bg-gray-100 text-gray-500 transition-colors"
+            className="pixel-button pixel-button-ghost h-9 min-h-0 px-2 py-1"
             title="返回频道列表"
           >
             <ArrowLeft size={20} />
@@ -876,12 +876,12 @@ export default function ChannelDetailPage() {
                 <button
                   onClick={() => {
                     setShowInvitePanel((prev) => !prev);
-                    if (showInvitePanel) {
-                      setInviteSearch('');
-                      setSelectedInviteAgentIds([]);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-primary-200 bg-primary-50 text-primary-700 text-sm font-medium hover:bg-primary-100 transition-colors"
+                if (showInvitePanel) {
+                  setInviteSearch('');
+                  setSelectedInviteAgentIds([]);
+                }
+              }}
+                  className="pixel-button pixel-button-primary min-h-0 px-3 py-1.5 text-[11px]"
                 >
                   <UserPlus size={14} />
                   邀请 Agent
@@ -890,7 +890,7 @@ export default function ChannelDetailPage() {
               <button
                 onClick={handleDeleteChannel}
                 disabled={deleting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-red-200 bg-red-50 text-red-600 text-sm font-medium hover:bg-red-100 transition-colors disabled:opacity-50"
+                className="pixel-button pixel-button-danger min-h-0 px-3 py-1.5 text-[11px]"
               >
                 <Trash2 size={14} />
                 {deleting ? '删除中...' : '删除频道'}
@@ -908,14 +908,14 @@ export default function ChannelDetailPage() {
         {/* 消息区域 + 输入框 */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* 消息列表 */}
-          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-4">
+          <div ref={scrollContainerRef} className="pixel-panel-soft m-4 mr-2 flex-1 overflow-y-auto px-6 py-4">
             {/* 加载更多按钮 */}
             {hasMore && (
               <div className="text-center mb-4">
                 <button
                   onClick={() => cursor && loadMessages(cursor)}
                   disabled={loadingMore}
-                  className="px-4 py-2 text-sm text-primary-600 hover:bg-primary-50 rounded-md transition-colors disabled:opacity-50"
+                  className="pixel-button pixel-button-ghost min-h-0 px-4 py-2 text-[11px] disabled:cursor-not-allowed"
                 >
                   {loadingMore ? '加载中...' : '加载更早的消息'}
                 </button>
@@ -941,7 +941,7 @@ export default function ChannelDetailPage() {
                   return (
                     <div
                       key={msg.id}
-                      className={`group border-l-[3px] ${color.border} ${compact ? 'pl-12 ml-[1px]' : 'pt-3 pl-3'} rounded-r-md hover:${color.bg} transition-colors`}
+                      className={`group border-l-[3px] ${color.border} ${compact ? 'ml-[1px] pl-12' : 'pt-3 pl-3'} transition-colors`}
                     >
                       {!compact && (
                         <div className="flex items-center gap-3 mb-1">
@@ -1116,7 +1116,7 @@ export default function ChannelDetailPage() {
                         {isAuthenticated && !isAdmin && channel.is_archived !== 1 && (
                           <button
                             onClick={() => handleReply(msg)}
-                            className="absolute -right-1 top-0 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-primary-600"
+                            className="absolute -right-1 top-0 opacity-0 group-hover:opacity-100 transition-opacity pixel-button pixel-button-ghost h-7 min-h-0 px-1.5 py-1 text-[11px]"
                             title={`回复 ${msg.sender_name || msg.sender_id.substring(0, 8)}，触发 Agent 回复`}
                           >
                             <Reply size={14} />
@@ -1133,10 +1133,10 @@ export default function ChannelDetailPage() {
 
           {/* 管理员评论输入框（仅登录后显示） */}
           {isAuthenticated && channel.is_archived !== 1 && (
-            <div className="border-t border-gray-200 bg-white px-6 py-3 shrink-0">
+            <div className="pixel-panel mx-4 mb-4 mt-0 border-t border-gray-200 px-6 py-3 shrink-0">
               {/* 回复指示条 */}
               {replyTo && (
-                <div className="flex items-center gap-2 mb-2 px-3 py-1.5 rounded-md bg-primary-50 border border-primary-200 text-sm">
+                <div className="pixel-panel-soft mb-2 flex items-center gap-2 border border-primary-200 bg-primary-50 px-3 py-1.5 text-sm">
                   <Reply size={14} className="text-primary-500 shrink-0" />
                   <span className="text-primary-700 truncate">
                     回复 <span className="font-semibold">{replyTo.sender_name || replyTo.sender_id.substring(0, 8)}</span>
@@ -1144,7 +1144,7 @@ export default function ChannelDetailPage() {
                   </span>
                   <button
                     onClick={handleCancelReply}
-                    className="ml-auto p-0.5 rounded hover:bg-primary-100 text-primary-400 hover:text-primary-600 shrink-0"
+                    className="pixel-button pixel-button-ghost ml-auto h-7 min-h-0 px-1.5 py-1 text-[11px] shrink-0"
                     title="取消回复"
                   >
                     <X size={14} />
@@ -1160,20 +1160,20 @@ export default function ChannelDetailPage() {
                       return !prev;
                     });
                   }}
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                  className="pixel-button pixel-button-ghost min-h-0 px-2 py-1 text-[11px]"
                 >
                   <Tag size={12} />
                   附加意图
                   {showIntentPanel ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {showIntentPanel && (
-                  <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <div className="pixel-panel-soft mt-2 grid grid-cols-2 gap-3 border border-gray-200 bg-gray-50 p-3 sm:grid-cols-4">
                     <div>
                       <label className="block text-[11px] text-gray-500 mb-1">任务类型</label>
                       <select
                         value={intentTaskType}
                         onChange={(e) => setIntentTaskType(e.target.value)}
-                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                        className="pixel-select w-full px-2 py-1.5 text-sm"
                       >
                         <option value="">不指定</option>
                         {Object.entries(taskTypeLabels).map(([key, { label, icon }]) => (
@@ -1186,7 +1186,7 @@ export default function ChannelDetailPage() {
                       <select
                         value={intentPriority}
                         onChange={(e) => setIntentPriority(e.target.value)}
-                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                        className="pixel-select w-full px-2 py-1.5 text-sm"
                       >
                         <option value="">不指定</option>
                         {Object.entries(priorityStyles).map(([key, { label }]) => (
@@ -1200,7 +1200,7 @@ export default function ChannelDetailPage() {
                         type="datetime-local"
                         value={intentDeadline}
                         onChange={(e) => setIntentDeadline(e.target.value)}
-                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                        className="pixel-input w-full px-2 py-1.5 text-sm"
                       />
                     </div>
                     <div className="flex items-end">
@@ -1218,7 +1218,7 @@ export default function ChannelDetailPage() {
                 )}
               </div>
               {showDiscussionPanel && (
-                <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-3">
+                <div className="pixel-panel-soft mb-3 border border-indigo-200 bg-indigo-50 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-indigo-900">线性循环讨论</div>
@@ -1228,7 +1228,7 @@ export default function ChannelDetailPage() {
                     </div>
                     <button
                       onClick={toggleDiscussionPanel}
-                      className="text-xs px-2.5 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition-colors"
+                      className="pixel-button pixel-button-ghost min-h-0 px-2.5 py-1 text-[11px]"
                     >
                       取消讨论模式
                     </button>
@@ -1241,7 +1241,7 @@ export default function ChannelDetailPage() {
                       value={discussionRounds}
                       onChange={(e) => setDiscussionRounds(sanitizeDiscussionRoundsInput(e.target.value))}
                       inputMode="numeric"
-                      className="w-16 rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                      className="pixel-input w-16 px-2 py-1.5 text-sm"
                     />
                     <label className="inline-flex items-center gap-1.5 text-xs text-indigo-800 cursor-pointer">
                       <input
@@ -1256,7 +1256,7 @@ export default function ChannelDetailPage() {
                       当前顺序：{selectedDiscussionAgentIds.map((agentId) => memberNameMap.get(agentId) || agentId.slice(0, 8)).join(' → ') || '未选择'}
                     </span>
                   </div>
-                  <div className="max-h-40 overflow-y-auto rounded-lg border border-indigo-100 bg-white divide-y divide-indigo-50">
+                  <div className="max-h-40 overflow-y-auto border border-indigo-100 bg-white divide-y divide-indigo-50">
                     {discussionCandidates.length === 0 ? (
                       <div className="px-3 py-6 text-center text-xs text-indigo-400">
                         当前没有在线成员可参与线性讨论
@@ -1287,18 +1287,18 @@ export default function ChannelDetailPage() {
               )}
               {/* 意图附加面板 */}
               {showIntentPanel && (
-                <div className="mb-2 rounded-lg border border-purple-200 bg-purple-50 p-3 space-y-2">
+                <div className="pixel-panel-soft mb-2 border border-purple-200 bg-purple-50 p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-purple-800">消息意图</span>
-                    <button onClick={() => { setShowIntentPanel(false); resetIntentForm(); }} className="text-xs text-purple-600 hover:text-purple-800">关闭</button>
+                    <button onClick={() => { setShowIntentPanel(false); resetIntentForm(); }} className="pixel-button pixel-button-ghost min-h-0 px-2 py-1 text-[11px]">关闭</button>
                   </div>
                   <div className="flex items-center gap-3 flex-wrap">
-                    <select value={intentTaskType} onChange={(e) => setIntentTaskType(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                    <select value={intentTaskType} onChange={(e) => setIntentTaskType(e.target.value)} className="pixel-select px-2 py-1 text-xs">
                       <option value="">任务类型</option>
                       {Object.entries(taskTypeLabels).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
                       <option value="custom:other">自定义</option>
                     </select>
-                    <select value={intentPriority} onChange={(e) => setIntentPriority(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                    <select value={intentPriority} onChange={(e) => setIntentPriority(e.target.value)} className="pixel-select px-2 py-1 text-xs">
                       <option value="">优先级</option>
                       {Object.entries(priorityStyles).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                     </select>
@@ -1306,7 +1306,7 @@ export default function ChannelDetailPage() {
                       <input type="checkbox" checked={intentRequiresApproval} onChange={(e) => setIntentRequiresApproval(e.target.checked)} className="h-3.5 w-3.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
                       需要审批
                     </label>
-                    <input type="datetime-local" value={intentDeadline} onChange={(e) => setIntentDeadline(e.target.value)} className="text-xs rounded border border-purple-200 bg-white px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400" placeholder="截止时间" />
+                    <input type="datetime-local" value={intentDeadline} onChange={(e) => setIntentDeadline(e.target.value)} className="pixel-input px-2 py-1 text-xs" placeholder="截止时间" />
                   </div>
                 </div>
               )}
@@ -1330,10 +1330,10 @@ export default function ChannelDetailPage() {
                           : '以管理员身份发送评论，输入 @ 可选择频道成员… (Ctrl+Enter 发送)'
                     }
                     rows={1}
-                    className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2.5 text-sm leading-5 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder-gray-400"
+                    className="pixel-textarea w-full resize-none px-3 py-2.5 text-sm leading-5 placeholder-gray-400"
                   />
                   {mentionDraft && mentionCandidates.length > 0 && (
-                    <div className="absolute left-0 right-0 bottom-full mb-2 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+                    <div className="pixel-panel absolute bottom-full left-0 right-0 mb-2 overflow-hidden">
                       {mentionCandidates.map((member) => (
                         <button
                           key={member.agent_id}
@@ -1355,10 +1355,10 @@ export default function ChannelDetailPage() {
                 </div>
                 <button
                   onClick={() => setShowIntentPanel(!showIntentPanel)}
-                  className={`flex items-center justify-center gap-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors shrink-0 ${
+                  className={`pixel-button min-h-0 shrink-0 px-3 py-2 text-[11px] ${
                     showIntentPanel
-                      ? 'border-purple-300 bg-purple-100 text-purple-700'
-                      : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                      ? 'pixel-button-secondary'
+                      : 'pixel-button-ghost'
                   }`}
                   title="附加消息意图"
                 >
@@ -1371,7 +1371,7 @@ export default function ChannelDetailPage() {
                       ? !comment.trim() || selectedDiscussionAgentIds.length < 1 || !resolvedDiscussionRounds || startingDiscussion
                       : false
                   }
-                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  className="pixel-button pixel-button-secondary shrink-0 px-4 py-2 text-[11px] disabled:cursor-not-allowed"
                 >
                   <Users size={14} />
                   {showDiscussionPanel ? (startingDiscussion ? '发起中...' : '开始讨论') : '线性讨论'}
@@ -1379,7 +1379,7 @@ export default function ChannelDetailPage() {
                 <button
                   onClick={handleSendComment}
                   disabled={!comment.trim() || sending || showDiscussionPanel}
-                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  className="pixel-button pixel-button-primary shrink-0 px-4 py-2 text-[11px] disabled:cursor-not-allowed"
                 >
                   <Send size={14} />
                   {sending ? '发送中...' : '发送'}
@@ -1393,9 +1393,9 @@ export default function ChannelDetailPage() {
         </div>
 
         {/* 右侧成员面板 */}
-        <div className="w-60 border-l border-gray-200 bg-gray-50 overflow-y-auto shrink-0">
+        <div className="pixel-panel-soft m-4 ml-2 w-60 overflow-y-auto shrink-0">
           <div className="px-4 py-3 border-b border-gray-200">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+            <div className="flex items-center gap-2 font-pixel text-xs uppercase tracking-[0.08em] text-gray-700">
               <Users size={16} />
               成员 ({channel.members?.length || 0})
             </div>
@@ -1409,9 +1409,9 @@ export default function ChannelDetailPage() {
                 value={inviteSearch}
                 onChange={(e) => setInviteSearch(e.target.value)}
                 placeholder="搜索 Agent"
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                className="pixel-input w-full px-3 py-2 text-sm"
               />
-              <div className="max-h-56 overflow-y-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+              <div className="max-h-56 overflow-y-auto border border-gray-200 divide-y divide-gray-100">
                 {filteredAvailableAgents.length === 0 ? (
                   <div className="px-3 py-6 text-xs text-center text-gray-400">
                     没有可邀请的 Agent
@@ -1446,7 +1446,7 @@ export default function ChannelDetailPage() {
               <button
                 onClick={handleInviteAgents}
                 disabled={selectedInviteAgentIds.length === 0 || inviting}
-                className="w-full px-3 py-2 rounded-md bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="pixel-button pixel-button-primary w-full justify-center px-3 py-2 text-[11px] disabled:cursor-not-allowed"
               >
                 {inviting ? '邀请中...' : '邀请所选 Agent'}
               </button>
@@ -1458,7 +1458,7 @@ export default function ChannelDetailPage() {
               return (
                 <div
                   key={m.agent_id}
-                  className="flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-gray-100 transition-colors group"
+                  className="group flex items-center gap-2.5 px-2 py-2 hover:bg-gray-100 transition-colors"
                 >
                   <div className={`w-7 h-7 rounded-md ${mColor.avatar} flex items-center justify-center text-xs font-semibold text-white shrink-0`}>
                     {(m.agent_name || '?')[0].toUpperCase()}
@@ -1485,7 +1485,7 @@ export default function ChannelDetailPage() {
                   </div>
                   {isAuthenticated && (
                     <button
-                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all text-[10px] shrink-0"
+                      className="pixel-button pixel-button-ghost opacity-0 group-hover:opacity-100 h-7 min-h-0 px-2 py-1 transition-all text-[10px] shrink-0"
                       title="设置角色定位"
                       onClick={async () => {
                         const role = await usePromptStore.getState().prompt({
@@ -1548,7 +1548,7 @@ function renderContent(content: string, contentType: string) {
     try {
       const parsed = JSON.parse(content);
       return (
-        <pre className="bg-gray-100 rounded-md p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+        <pre className="pixel-code-block p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
           {JSON.stringify(parsed, null, 2)}
         </pre>
       );

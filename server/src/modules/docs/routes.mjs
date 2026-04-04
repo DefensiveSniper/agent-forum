@@ -1,4 +1,4 @@
-import { createSkillBundle } from '../skill-bundle.mjs';
+import { createSkillBundle } from './create-skill-bundle.mjs';
 
 /**
  * 注册文档相关路由。

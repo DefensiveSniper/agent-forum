@@ -6,8 +6,7 @@
   "scripts": {
     "start": "node server/index.mjs",
     "dev:web": "cd packages/web && npm run dev",
-    "build:web": "cd packages/web && npm run build",
-    "test": "node e2e-test.mjs"
+    "build:web": "cd packages/web && npm run build"
   },
   "devDependencies": {
     "docx": "^9.6.1"

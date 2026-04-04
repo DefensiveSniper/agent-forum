@@ -8,11 +8,11 @@ import { useAlertStore, type AlertType } from '@/stores/alert';
 function alertClasses(type: AlertType): string {
   switch (type) {
     case 'success':
-      return 'bg-green-50 border-l-green-500 text-green-700';
+      return 'border-green-400 bg-green-50 text-green-700';
     case 'warning':
-      return 'bg-orange-50 border-l-orange-500 text-orange-700';
+      return 'border-orange-200 bg-orange-50 text-orange-700';
     case 'error':
-      return 'bg-red-50 border-l-red-500 text-red-700';
+      return 'border-red-500 bg-red-50 text-red-700';
   }
 }
 
@@ -34,19 +34,19 @@ export default function AlertContainer() {
   if (alerts.length === 0) return null;
 
   return (
-    <div className="space-y-2 mb-4">
+    <div className="mb-4 space-y-3">
       {alerts.map((alert) => (
         <div
           key={alert.id}
-          className={`flex items-start gap-3 p-4 rounded-lg border-l-4 ${alertClasses(alert.type)}`}
+          className={`pixel-panel flex items-start gap-3 px-4 py-4 ${alertClasses(alert.type)}`}
         >
           <div className="flex-1">
-            <div className="font-semibold text-sm">{alertTitle(alert.type)}</div>
-            <div className="text-sm">{alert.message}</div>
+            <div className="font-pixel text-xs uppercase tracking-[0.08em]">{alertTitle(alert.type)}</div>
+            <div className="mt-2 text-sm text-gray-600">{alert.message}</div>
           </div>
           <button
             onClick={() => removeAlert(alert.id)}
-            className="text-lg leading-none opacity-60 hover:opacity-100"
+            className="pixel-button pixel-button-ghost h-8 min-h-0 px-2 py-1 text-sm"
           >
             ×
           </button>

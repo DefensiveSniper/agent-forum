@@ -103,12 +103,12 @@ export default function InvitesPage() {
   };
 
   return (
-    <div>
+    <div className="pixel-page">
       {/* 操作按钮 */}
       <div className="mb-6 flex justify-end">
         <button
           onClick={() => setShowForm(!showForm)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-md text-sm font-medium hover:bg-primary-700 transition-colors"
+          className="pixel-button pixel-button-primary"
         >
           <Plus size={16} />
           生成邀请码
@@ -117,21 +117,22 @@ export default function InvitesPage() {
 
       {/* 生成表单 */}
       {showForm && (
-        <div className="bg-white rounded-xl p-6 border border-gray-200 max-w-[600px] mb-6">
-          <h3 className="font-semibold text-gray-900 mb-4">生成新邀请码</h3>
+        <div className="pixel-panel mb-6 max-w-[640px] p-6">
+          <div className="pixel-kicker">Invite Generator</div>
+          <h3 className="pixel-title mt-3 text-lg">生成新邀请码</h3>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">标签</label>
+              <label className="mb-2 block font-pixel text-xs uppercase tracking-[0.08em] text-gray-500">标签</label>
               <input
                 type="text"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 placeholder="例如: 内测用户"
-                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-600/20 focus:border-primary-600"
+                className="pixel-input w-full px-3 py-2.5 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="mb-2 block font-pixel text-xs uppercase tracking-[0.08em] text-gray-500">
                 最大使用次数 (0 = 无限)
               </label>
               <input
@@ -139,19 +140,19 @@ export default function InvitesPage() {
                 value={maxUses}
                 onChange={(e) => setMaxUses(e.target.value)}
                 min="0"
-                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-600/20 focus:border-primary-600"
+                className="pixel-input w-full px-3 py-2.5 text-sm"
               />
             </div>
             <div className="flex gap-3 justify-end pt-4 border-t border-gray-200">
               <button
                 onClick={() => setShowForm(false)}
-                className="px-4 py-2.5 border border-gray-300 bg-gray-100 text-gray-900 rounded-md text-sm font-medium hover:bg-gray-200 transition-colors"
+                className="pixel-button pixel-button-ghost"
               >
                 取消
               </button>
               <button
                 onClick={handleSubmit}
-                className="px-4 py-2.5 bg-primary-600 text-white rounded-md text-sm font-medium hover:bg-primary-700 transition-colors"
+                className="pixel-button pixel-button-primary"
               >
                 生成
               </button>
@@ -164,7 +165,7 @@ export default function InvitesPage() {
       {invites.length === 0 ? (
         <EmptyState icon="🎫" title="暂无邀请码" message="点击上方按钮生成邀请码" />
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="pixel-panel overflow-hidden">
           <table className="w-full">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
@@ -214,7 +215,7 @@ export default function InvitesPage() {
                       {status === 'valid' ? (
                         <button
                           onClick={() => handleRevoke(inv.id)}
-                          className="px-3 py-1.5 bg-red-500 text-white rounded-md text-xs font-medium hover:bg-red-600 transition-colors"
+                          className="pixel-button pixel-button-danger min-h-0 px-3 py-1.5 text-[11px]"
                         >
                           作废
                         </button>

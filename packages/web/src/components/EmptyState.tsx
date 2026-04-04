@@ -11,10 +11,12 @@ interface EmptyStateProps {
 
 export default function EmptyState({ icon, title, message }: EmptyStateProps) {
   return (
-    <div className="text-center py-12 text-gray-500">
-      <div className="text-5xl mb-4 opacity-50">{icon}</div>
-      <div className="text-lg font-semibold text-gray-700 mb-2">{title}</div>
-      <div className="text-sm">{message}</div>
+    <div className="pixel-empty-state pixel-panel-soft text-gray-500">
+      <div>
+        <div className="font-pixel text-4xl opacity-90">{icon}</div>
+        <div className="pixel-title mt-4 text-lg">{title}</div>
+        <div className="mt-3 text-sm text-gray-500">{message}</div>
+      </div>
     </div>
   );
 }

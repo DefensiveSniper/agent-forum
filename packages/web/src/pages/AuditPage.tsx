@@ -218,21 +218,21 @@ export default function AuditPage() {
   };
 
   return (
-    <div>
+    <div className="pixel-page">
       {/* Tab 切换 */}
-      <div className="flex gap-1 mb-6 bg-gray-100 rounded-lg p-1 w-fit">
+      <div className="pixel-tabs mb-6 w-fit">
         <button
           onClick={() => setTab('agents')}
-          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-            tab === 'agents' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          className={`pixel-tab ${
+            tab === 'agents' ? 'pixel-tab-active' : 'text-gray-600'
           }`}
         >
           Agent 管理
         </button>
         <button
           onClick={() => setTab('capabilities')}
-          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-            tab === 'capabilities' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+          className={`pixel-tab ${
+            tab === 'capabilities' ? 'pixel-tab-active' : 'text-gray-600'
           }`}
         >
           能力目录
@@ -243,21 +243,21 @@ export default function AuditPage() {
       {tab === 'agents' && (
         <div>
           {newApiKey && (
-            <div className="flex items-start gap-3 p-4 rounded-lg border-l-4 bg-yellow-50 border-l-yellow-400 text-yellow-800 mb-6">
+            <div className="pixel-panel mb-6 flex items-start gap-3 border-yellow-400 bg-yellow-50 px-4 py-4 text-yellow-800">
               <div className="flex-1">
-                <div className="font-semibold text-sm mb-2">新 API 密钥</div>
+                <div className="font-pixel text-xs uppercase tracking-[0.08em] mb-2">新 API 密钥</div>
                 <div className="flex items-center gap-2">
                   <code className="text-xs font-mono">{newApiKey}</code>
                   <CopyButton text={newApiKey} />
                 </div>
               </div>
-              <button onClick={() => setNewApiKey(null)} className="text-lg leading-none opacity-60 hover:opacity-100">
+              <button onClick={() => setNewApiKey(null)} className="pixel-button pixel-button-ghost h-8 min-h-0 px-2 py-1 text-sm">
                 ×
               </button>
             </div>
           )}
 
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="pixel-panel overflow-hidden">
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -285,10 +285,10 @@ export default function AuditPage() {
                         <div className="flex gap-2">
                           <button
                             onClick={() => toggleAgentCaps(agent.id)}
-                            className={`px-3 py-1.5 border rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${
+                            className={`pixel-button min-h-0 px-3 py-1.5 text-[11px] ${
                               isExpanded
-                                ? 'bg-indigo-50 text-indigo-700 border-indigo-300'
-                                : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
+                                ? 'pixel-button-secondary'
+                                : 'pixel-button-ghost'
                             }`}
                             title="管理能力"
                           >
@@ -296,20 +296,20 @@ export default function AuditPage() {
                           </button>
                           <button
                             onClick={() => toggleStatus(agent.id, isSuspended)}
-                            className="px-3 py-1.5 border border-gray-300 bg-gray-100 text-gray-900 rounded-md text-xs font-medium hover:bg-gray-200 transition-colors"
+                            className="pixel-button pixel-button-ghost min-h-0 px-3 py-1.5 text-[11px]"
                           >
                             {isSuspended ? '激活' : '暂停'}
                           </button>
                           <button
                             onClick={() => rotateKey(agent.id)}
-                            className="p-1.5 border border-gray-300 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+                            className="pixel-button pixel-button-ghost h-8 min-h-0 px-2 py-1"
                             title="重新生成密钥"
                           >
                             <RefreshCw size={14} />
                           </button>
                           <button
                             onClick={() => deleteAgent(agent.id)}
-                            className="p-1.5 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                            className="pixel-button pixel-button-danger h-8 min-h-0 px-2 py-1"
                             title="删除"
                           >
                             <Trash2 size={14} />
@@ -325,18 +325,18 @@ export default function AuditPage() {
             {/* Agent 能力展开面板 */}
             {expandedAgent && (
               <div className="border-t border-gray-200 bg-gray-50 px-6 py-4">
-                <div className="text-sm font-semibold text-gray-700 mb-3">
+                <div className="font-pixel text-xs uppercase tracking-[0.08em] text-gray-500 mb-3">
                   已注册能力
                 </div>
                 {agentCaps.length > 0 ? (
                   <div className="flex flex-wrap gap-2 mb-4">
                     {agentCaps.map((cap) => (
-                      <span key={cap.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border border-gray-200 text-sm">
+                      <span key={cap.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-gray-200 text-sm">
                         <span className="font-medium">{cap.capability}</span>
                         <span className="text-xs text-gray-500">({cap.proficiency})</span>
                         <button
                           onClick={() => removeAgentCapability(expandedAgent, cap.id)}
-                          className="text-gray-400 hover:text-red-500 ml-1"
+                          className="pixel-button pixel-button-ghost ml-1 h-7 min-h-0 px-1.5 py-1 text-[11px]"
                         >
                           <X size={12} />
                         </button>
@@ -355,7 +355,7 @@ export default function AuditPage() {
                       value={addCapForm.capability}
                       onChange={(e) => setAddCapForm({ ...addCapForm, capability: e.target.value })}
                       placeholder="如 code_review"
-                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+                      className="pixel-input w-full px-3 py-1.5 text-sm"
                     />
                   </div>
                   <div className="w-28">
@@ -363,7 +363,7 @@ export default function AuditPage() {
                     <select
                       value={addCapForm.proficiency}
                       onChange={(e) => setAddCapForm({ ...addCapForm, proficiency: e.target.value })}
-                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md"
+                      className="pixel-select w-full px-2 py-1.5 text-sm"
                     >
                       {VALID_PROFICIENCIES.map((p) => (
                         <option key={p} value={p}>{p}</option>
@@ -373,7 +373,7 @@ export default function AuditPage() {
                   <button
                     onClick={() => addAgentCapability(expandedAgent)}
                     disabled={!addCapForm.capability.trim()}
-                    className="px-4 py-1.5 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="pixel-button pixel-button-secondary min-h-0 px-4 py-1.5 text-[11px] disabled:cursor-not-allowed"
                   >
                     添加
                   </button>
@@ -393,14 +393,14 @@ export default function AuditPage() {
             </div>
             <button
               onClick={() => setShowNewCapForm(!showNewCapForm)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 transition-colors"
+              className="pixel-button pixel-button-secondary min-h-0 px-3 py-1.5 text-[11px]"
             >
               <Plus size={14} /> 新增能力
             </button>
           </div>
 
           {showNewCapForm && (
-            <div className="bg-white rounded-xl border border-indigo-200 p-4 mb-4">
+            <div className="pixel-panel mb-4 border-indigo-200 p-4">
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">标识名 (英文)</label>
@@ -409,7 +409,7 @@ export default function AuditPage() {
                     value={newCap.name}
                     onChange={(e) => setNewCap({ ...newCap, name: e.target.value })}
                     placeholder="code_review"
-                    className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+                    className="pixel-input w-full px-3 py-1.5 text-sm"
                   />
                 </div>
                 <div>
@@ -419,7 +419,7 @@ export default function AuditPage() {
                     value={newCap.displayName}
                     onChange={(e) => setNewCap({ ...newCap, displayName: e.target.value })}
                     placeholder="代码审查"
-                    className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+                    className="pixel-input w-full px-3 py-1.5 text-sm"
                   />
                 </div>
                 <div>
@@ -427,7 +427,7 @@ export default function AuditPage() {
                   <select
                     value={newCap.category}
                     onChange={(e) => setNewCap({ ...newCap, category: e.target.value })}
-                    className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+                    className="pixel-select w-full px-3 py-1.5 text-sm"
                   >
                     {VALID_CATEGORIES.map((c) => (
                       <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>
@@ -441,21 +441,21 @@ export default function AuditPage() {
                     value={newCap.description}
                     onChange={(e) => setNewCap({ ...newCap, description: e.target.value })}
                     placeholder="可选"
-                    className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+                    className="pixel-input w-full px-3 py-1.5 text-sm"
                   />
                 </div>
               </div>
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setShowNewCapForm(false)}
-                  className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
+                  className="pixel-button pixel-button-ghost min-h-0 px-3 py-1.5 text-[11px]"
                 >
                   取消
                 </button>
                 <button
                   onClick={addCatalogEntry}
                   disabled={!newCap.name.trim() || !newCap.displayName.trim()}
-                  className="px-4 py-1.5 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="pixel-button pixel-button-secondary min-h-0 px-4 py-1.5 text-[11px] disabled:cursor-not-allowed"
                 >
                   添加
                 </button>
@@ -463,7 +463,7 @@ export default function AuditPage() {
             </div>
           )}
 
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="pixel-panel overflow-hidden">
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -482,7 +482,7 @@ export default function AuditPage() {
                       <div className="text-xs text-gray-500 font-mono">{entry.name}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-700 border border-gray-200">
+                      <span className="pixel-badge px-2 py-0.5 text-[10px]">
                         {CATEGORY_LABELS[entry.category] || entry.category}
                       </span>
                     </td>
@@ -491,7 +491,7 @@ export default function AuditPage() {
                     <td className="px-4 py-3">
                       <button
                         onClick={() => deleteCatalogEntry(entry.id)}
-                        className="p-1.5 bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                        className="pixel-button pixel-button-danger h-8 min-h-0 px-2 py-1"
                         title="删除"
                       >
                         <Trash2 size={14} />

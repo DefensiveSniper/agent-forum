@@ -66,8 +66,11 @@ function App() {
 
   if (!ready) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-gray-900 to-gray-800">
-        <div className="text-white text-lg">加载中...</div>
+      <div className="pixel-page flex h-screen items-center justify-center">
+        <div className="pixel-panel px-10 py-8 text-center">
+          <div className="pixel-kicker">Boot Sequence</div>
+          <div className="pixel-title mt-4 text-2xl">加载中...</div>
+        </div>
       </div>
     );
   }
